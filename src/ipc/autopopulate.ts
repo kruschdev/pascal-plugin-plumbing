@@ -27,9 +27,11 @@ import {
 } from './framing-interop'
 import {
   type RoomPolygon2D,
+  type WallOpeningSpan,
   type WallSegment2D,
   extractPlumbingObstacles,
   extractRoomPolygons,
+  extractWallOpenings,
   extractWallSegments,
   nearestWallToPoint,
   pointInPolygon2D,
@@ -299,11 +301,98 @@ export function planPlumbingAutoPopulate(
   const rooms = extractRoomPolygons(nodes, levelId, occupancy)
   const levelH = resolveLevelHeightM(nodes, levelId)
   const obstacles = extractPlumbingObstacles(nodes, levelId)
+  const wallOpenings = extractWallOpenings(nodes, levelId)
+  const openingsByWall = new Map<string, WallOpeningSpan[]>()
+  for (const op of wallOpenings) {
+    let list = openingsByWall.get(op.wallId)
+    if (!list) {
+      list = []
+      openingsByWall.set(op.wallId, list)
+    }
+    list.push(op)
+  }
   const bones =
     bonesMode === 'ignore'
       ? null
       : extractBonesPlumbingContext(nodes, levelId)
   const bounds = sceneBounds(walls, rooms)
+
+  // Spatial clearance predicates covering ALL structural obstacles (floor girders, door/window headers,
+  // ceiling/ridge beams, structural columns) + NEC 110.26(E) dedicated electrical spaces + Pascal wall openings.
+  const floorBeamsForNudge = obstacles.filter((o) => o.category === 'structural' && o.box.minY < 0.15)
+  const hitsFloorBeamXZ = (cx: number, cz: number, pad = 0.28): boolean =>
+    floorBeamsForNudge.some(
+      (b) =>
+        cx >= b.box.minX - pad &&
+        cx <= b.box.maxX + pad &&
+        cz >= b.box.minZ - pad &&
+        cz <= b.box.maxZ + pad,
+    )
+  const hitsAnyObstacleXZ = (cx: number, cz: number, pad = 0.28): boolean =>
+    obstacles.some(
+      (o) =>
+        cx >= o.box.minX - pad &&
+        cx <= o.box.maxX + pad &&
+        cz >= o.box.minZ - pad &&
+        cz <= o.box.maxZ + pad,
+    )
+  const hitsWallOpening = (
+    wallId: string,
+    alongM: number,
+    pad = 0.28,
+    allowWindows = false,
+  ): boolean => {
+    const ops = openingsByWall.get(wallId)
+    if (!ops || ops.length === 0) return false
+    return ops.some((op) => {
+      if (allowWindows && op.kind === 'window') return false
+      return alongM >= op.startU - pad && alongM <= op.endU + pad
+    })
+  }
+  const hitsAnyWallOpeningXZ = (
+    cx: number,
+    cz: number,
+    pad = 0.28,
+    allowWindows = false,
+  ): boolean => {
+    for (const w of walls) {
+      const ops = openingsByWall.get(w.id)
+      if (!ops || ops.length === 0) continue
+      const dx = cx - w.start[0]
+      const dz = cz - w.start[1]
+      const along = dx * w.ux + dz * w.uz
+      const perp = Math.abs(dx * w.nx + dz * w.nz)
+      if (perp > w.thicknessM / 2 + pad) continue
+      if (
+        ops.some(
+          (op) =>
+            !(allowWindows && op.kind === 'window') &&
+            along >= op.startU - pad &&
+            along <= op.endU + pad,
+        )
+      ) {
+        return true
+      }
+    }
+    return false
+  }
+  const nudgeOffFloorGirder = (
+    x: number,
+    z: number,
+    pad = 0.16,
+    maxShifts: ReadonlyArray<number> = [0.22, -0.22, 0.36, -0.36, 0.52, -0.52],
+  ): readonly [number, number] => {
+    if (!hitsFloorBeamXZ(x, z, pad)) return [x, z]
+    for (const d of maxShifts) {
+      if (!hitsFloorBeamXZ(x + d, z, pad)) return [x + d, z]
+      if (!hitsFloorBeamXZ(x, z + d, pad)) return [x, z + d]
+    }
+    for (const d of maxShifts) {
+      if (!hitsFloorBeamXZ(x + d, z + d, pad)) return [x + d, z + d]
+      if (!hitsFloorBeamXZ(x + d, z - d, pad)) return [x + d, z - d]
+    }
+    return [x, z]
+  }
 
   const equipment: PlannedEquipmentSpec[] = []
   const manifolds: PlannedManifoldSpec[] = []
@@ -328,9 +417,10 @@ export function planPlumbingAutoPopulate(
     const kind = inferFixtureKindFromPascalItem(n)
     if (!kind) continue
     if (!Array.isArray(n.position) || n.position.length < 3) continue
-    const px = Number(n.position[0])
-    const pz = Number(n.position[2])
-    const room = rooms.find((r) => pointInPolygon2D(px, pz, r.polygon))
+    const rawPx = Number(n.position[0])
+    const rawPz = Number(n.position[2])
+    const [px, pz] = nudgeOffFloorGirder(rawPx, rawPz, 0.14)
+    const room = rooms.find((r) => pointInPolygon2D(rawPx, rawPz, r.polygon))
     const nearWall = nearestWallToPoint(px, pz, walls)
     const spec = FIXTURE_SPECS[kind]
     const rot =
@@ -417,16 +507,6 @@ export function planPlumbingAutoPopulate(
     })
   }
 
-  const floorBeamsForNudge = obstacles.filter((o) => o.category === 'structural' && o.box.minY < 0.15)
-  const hitsFloorBeamXZ = (cx: number, cz: number, pad = 0.28): boolean =>
-    floorBeamsForNudge.some(
-      (b) =>
-        cx >= b.box.minX - pad &&
-        cx <= b.box.maxX + pad &&
-        cz >= b.box.minZ - pad &&
-        cz <= b.box.maxZ + pad,
-    )
-
   if (bonesMode !== 'import-only') {
     for (const room of targetWetRooms) {
       if (populatedRoomNames.has(room.name) && bonesMode !== 'auto') continue
@@ -443,22 +523,25 @@ export function planPlumbingAutoPopulate(
       if (missing.length === 0) continue
 
       const nearWall = nearestWallToPoint(room.centroid[0], room.centroid[1], walls)
-      const rot = nearWall ? yawFacingRoom(nearWall.wall, room.centroid) : 0
       const count = missing.length
 
       for (let i = 0; i < count; i++) {
         const kind = missing[i]!
         const spec = FIXTURE_SPECS[kind]
         const wsfu = getFixtureWsfu(kind, occupancy)
+        const allowUnderWindow = kind === 'kitchen-sink'
         let px = room.centroid[0]
         let pz = room.centroid[1]
+        let chosenWall = nearWall?.wall
+        let rot = chosenWall ? yawFacingRoom(chosenWall, room.centroid) : 0
+
         if (nearWall) {
           const wall = nearWall.wall
           const span = Math.min(wall.lengthM * 0.72, Math.max(0.8, count * 0.65))
           const frac = count === 1 ? 0.5 : i / (count - 1)
           const offsetAlong = (frac - 0.5) * span
           const baseT = Math.max(0.15, Math.min(0.85, nearWall.t))
-          let alongM = wall.lengthM * baseT + offsetAlong
+          let alongM = Math.max(0.28, Math.min(wall.lengthM - 0.28, wall.lengthM * baseT + offsetAlong))
           const toCx = room.centroid[0] - (wall.start[0] + wall.ux * alongM)
           const toCz = room.centroid[1] - (wall.start[1] + wall.uz * alongM)
           const dot = toCx * wall.nx + toCz * wall.nz
@@ -466,22 +549,103 @@ export function planPlumbingAutoPopulate(
           const inward = wall.thicknessM / 2 + Math.min(0.28, spec.dimensionsM[2] / 2)
           px = wall.start[0] + wall.ux * alongM + wall.nx * sign * inward
           pz = wall.start[1] + wall.uz * alongM + wall.nz * sign * inward
-          // Keep vertical fixture risers clear of structural floor girders (IRC R502.8)
-          if (hitsFloorBeamXZ(px, pz, 0.25)) {
-            for (const shift of [0.48, -0.48, 0.85, -0.85]) {
-              const candAlong = Math.max(0.35, Math.min(wall.lengthM - 0.35, alongM + shift))
-              const cx = wall.start[0] + wall.ux * candAlong + wall.nx * sign * inward
-              const cz = wall.start[1] + wall.uz * candAlong + wall.nz * sign * inward
-              if (!hitsFloorBeamXZ(cx, cz, 0.25)) {
-                alongM = candAlong
-                px = cx
-                pz = cz
-                break
+
+          const isFixtureSpotBlocked = (
+            w: WallSegment2D,
+            candAlong: number,
+            cx: number,
+            cz: number,
+            pad: number,
+            allowWin: boolean,
+          ): boolean =>
+            hitsAnyObstacleXZ(cx, cz, pad) ||
+            hitsWallOpening(w.id, candAlong, pad, allowWin) ||
+            hitsAnyWallOpeningXZ(cx, cz, Math.min(0.2, pad), allowWin)
+
+          // Keep vertical fixture risers & rough-ins clear of ALL structural beams (floor girders AND
+          // door/window headers), structural columns, and wall openings (IRC R502.8 / R602).
+          if (isFixtureSpotBlocked(wall, alongM, px, pz, 0.26, false)) {
+            let foundClear = false
+            const maxStep = Math.ceil(wall.lengthM / 0.25)
+            // Pass 1: stay strictly clear of ALL obstacles + doors/windows on primary wall
+            for (let step = 1; step <= maxStep && !foundClear; step++) {
+              for (const dir of [1, -1] as const) {
+                const candAlong = alongM + dir * step * 0.25
+                if (candAlong < 0.28 || candAlong > wall.lengthM - 0.28) continue
+                const cx = wall.start[0] + wall.ux * candAlong + wall.nx * sign * inward
+                const cz = wall.start[1] + wall.uz * candAlong + wall.nz * sign * inward
+                if (!isFixtureSpotBlocked(wall, candAlong, cx, cz, 0.26, false)) {
+                  alongM = candAlong
+                  px = cx
+                  pz = cz
+                  foundClear = true
+                  break
+                }
               }
+            }
+            // Pass 2: if primary wall sits directly over a floor girder or is full of openings, try other nearby walls
+            if (!foundClear && walls.length > 1) {
+              const altWalls = walls
+                .filter((w) => w.id !== wall.id && w.lengthM >= 0.7)
+                .map((w) => {
+                  const proj = nearestWallToPoint(room.centroid[0], room.centroid[1], [w])!
+                  return { wall: w, t: proj.t, dist: proj.distanceM }
+                })
+                .filter((c) => c.dist <= Math.max(4.5, nearWall.distanceM + 2.5))
+                .sort((a, b) => a.dist - b.dist)
+
+              for (const alt of altWalls) {
+                const w = alt.wall
+                const baseA = Math.max(0.28, Math.min(w.lengthM - 0.28, w.lengthM * alt.t + offsetAlong * 0.5))
+                const aToCx = room.centroid[0] - (w.start[0] + w.ux * baseA)
+                const aToCz = room.centroid[1] - (w.start[1] + w.uz * baseA)
+                const aSign = aToCx * w.nx + aToCz * w.nz >= 0 ? 1 : -1
+                const aInward = w.thicknessM / 2 + Math.min(0.28, spec.dimensionsM[2] / 2)
+                const steps = Math.ceil(w.lengthM / 0.25)
+                for (let step = 0; step <= steps && !foundClear; step++) {
+                  const dirs = step === 0 ? ([0] as const) : ([1, -1] as const)
+                  for (const dir of dirs) {
+                    const candAlong = baseA + dir * step * 0.25
+                    if (candAlong < 0.28 || candAlong > w.lengthM - 0.28) continue
+                    const cx = w.start[0] + w.ux * candAlong + w.nx * aSign * aInward
+                    const cz = w.start[1] + w.uz * candAlong + w.nz * aSign * aInward
+                    if (
+                      room.polygon.length >= 3 &&
+                      !pointInPolygon2D(cx, cz, room.polygon) &&
+                      Math.hypot(cx - room.centroid[0], cz - room.centroid[1]) > 2.5
+                    ) {
+                      continue
+                    }
+                    if (!isFixtureSpotBlocked(w, candAlong, cx, cz, 0.24, allowUnderWindow)) {
+                      chosenWall = w
+                      rot = yawFacingRoom(w, room.centroid)
+                      px = cx
+                      pz = cz
+                      foundClear = true
+                      break
+                    }
+                  }
+                }
+                if (foundClear) break
+              }
+            }
+            // Pass 3: kitchen sink may sit beneath a window (never in a door) as long as floor is clear;
+            // routeVentRun automatically offsets its dry re-vent past the window header jamb!
+            if (!foundClear && allowUnderWindow && !hitsWallOpening(wall.id, alongM, 0.24, true)) {
+              const [nx, nz] = nudgeOffFloorGirder(px, pz, 0.22)
+              px = nx
+              pz = nz
+            } else if (!foundClear) {
+              const [nx, nz] = nudgeOffFloorGirder(px, pz, 0.22)
+              px = nx
+              pz = nz
             }
           }
         } else {
           px = room.centroid[0] + (i - (count - 1) / 2) * 0.75
+          const [nx, nz] = nudgeOffFloorGirder(px, pz, 0.22)
+          px = nx
+          pz = nz
         }
         fixtures.push({
           id: nextFixId(),
@@ -490,7 +654,7 @@ export function planPlumbingAutoPopulate(
           position: [round2(px), spec.roughInHeightM, round2(pz)],
           rotation: rot,
           roomName: room.name,
-          wallId: nearWall?.wall.id,
+          wallId: chosenWall?.id,
           dfu: getFixtureDfu(kind, codeEdition),
           wsfuCold: wsfu.cold,
           wsfuHot: wsfu.hot,
@@ -507,10 +671,30 @@ export function planPlumbingAutoPopulate(
     }
 
     // 3. Minimum 2 Frost-Proof Exterior Hose Bibbs (Front & Rear per IPC / best practice)
+    // Keep hose bibb & its cold supply tap (+0.06m X) clear of central floor girders, headers & openings!
     const hoseBibbSpec = FIXTURE_SPECS['hose-bibb']
     const hoseWsfu = getFixtureWsfu('hose-bibb', occupancy)
-    const frontBibbPos: Vec3 = [round2(bounds.cx), hoseBibbSpec.roughInHeightM, round2(bounds.maxZ + 0.08)]
-    const rearBibbPos: Vec3 = [round2(bounds.cx), hoseBibbSpec.roughInHeightM, round2(bounds.minZ - 0.08)]
+    const pickClearHoseBibbX = (z: number): number => {
+      const minX = bounds.minX + 0.35
+      const maxX = bounds.maxX - 0.35
+      const isClearAt = (x: number, pad: number): boolean =>
+        !hitsFloorBeamXZ(x, z, pad) &&
+        !hitsFloorBeamXZ(x + 0.06, z, pad) &&
+        !hitsAnyObstacleXZ(x, z, pad * 0.7) &&
+        !hitsAnyObstacleXZ(x + 0.06, z, pad * 0.7) &&
+        !hitsAnyWallOpeningXZ(x, z, 0.22, false)
+      for (const pad of [0.30, 0.16]) {
+        for (const shift of [0, 0.55, -0.55, 0.95, -0.95, 1.4, -1.4, 2.0, -2.0, 2.6, -2.6]) {
+          const cx = round2(Math.max(minX, Math.min(maxX, bounds.cx + shift)))
+          if (isClearAt(cx, pad)) return cx
+        }
+      }
+      return round2(bounds.cx)
+    }
+    const frontBibbZ = round2(bounds.maxZ + 0.08)
+    const rearBibbZ = round2(bounds.minZ - 0.08)
+    const frontBibbPos: Vec3 = [pickClearHoseBibbX(frontBibbZ), hoseBibbSpec.roughInHeightM, frontBibbZ]
+    const rearBibbPos: Vec3 = [pickClearHoseBibbX(rearBibbZ), hoseBibbSpec.roughInHeightM, rearBibbZ]
     fixtures.push(
       {
         id: nextFixId(),
@@ -697,7 +881,17 @@ export function planPlumbingAutoPopulate(
     waterEntryPos = [ex, 0.75, ez]
   }
 
-  let sewerExitPos: Vec3 = [round2(bounds.maxX + 1.2), foundationType === 'slab' ? -0.55 : -0.45, round2(bounds.cz)]
+  let sewerExitZ = round2(bounds.cz)
+  if (!bones?.sewerExitAnchor && hitsFloorBeamXZ(bounds.maxX, sewerExitZ, 0.35)) {
+    for (const shift of [0.65, -0.65, 1.15, -1.15, 1.75, -1.75]) {
+      const cz = round2(Math.max(bounds.minZ + 0.35, Math.min(bounds.maxZ - 0.35, bounds.cz + shift)))
+      if (!hitsFloorBeamXZ(bounds.maxX, cz, 0.35)) {
+        sewerExitZ = cz
+        break
+      }
+    }
+  }
+  let sewerExitPos: Vec3 = [round2(bounds.maxX + 1.2), foundationType === 'slab' ? -0.55 : -0.45, sewerExitZ]
   if (bones?.sewerExitAnchor) {
     const resolved = resolveBonesAnchorPosition(nodes, bones.sewerExitAnchor, -0.45)
     if (resolved) {
@@ -794,7 +988,12 @@ export function planPlumbingAutoPopulate(
   })
 
   let manifoldId: string | undefined
-  const manifoldPos: Vec3 = [round2(whPos[0] + mechDirX * 0.65), 1.35, round2(whPos[2] + mechDirZ * 0.65)]
+  const rawManifoldX = round2(whPos[0] + mechDirX * 0.65)
+  const rawManifoldZ = round2(whPos[2] + mechDirZ * 0.65)
+  const [manX, manZ] = hitsFloorBeamXZ(rawManifoldX, rawManifoldZ, 0.25)
+    ? nudgeOffStructuralBeams(rawManifoldX, rawManifoldZ)
+    : [rawManifoldX, rawManifoldZ]
+  const manifoldPos: Vec3 = [round2(manX), 1.35, round2(manZ)]
   if (supplyTopology === 'manifold') {
     manifoldId = nextManId()
     const neededPorts = Math.max(12, Math.ceil((fixtures.length * 1.6) / 6) * 6)
@@ -1004,35 +1203,99 @@ export function planPlumbingAutoPopulate(
       ? round2(drainFixtures.reduce((s, f) => s + f.position[2], 0) / drainFixtures.length)
       : round2(bounds.cz)
   // Prefer a 2x6 (>= 0.145m) wet wall for the 3"/4" Main DWV Soil & Vent Stack (IRC R602.6),
-  // and keep the vertical stack centerline clear of structural floor girders (IRC R502.8).
+  // and keep the vertical stack centerline clear of ALL structural beams (floor girders, door/window headers,
+  // ridge/ceiling beams), columns, NEC 110.26(E) spaces, and Pascal door/window openings (IRC R502.8 / R602).
   const wetCapableWalls = walls.filter((w) => w.thicknessM >= 0.145)
-  const stackNearWall = nearestWallToPoint(
-    stackX,
-    stackZ,
-    wetCapableWalls.length > 0 ? wetCapableWalls : walls,
-  )
+  const stackWallPool = wetCapableWalls.length > 0 ? wetCapableWalls : walls
+  const stackNearWall = nearestWallToPoint(stackX, stackZ, stackWallPool)
   let stackPt: readonly [number, number] = stackNearWall
     ? [round2(stackNearWall.point[0]), round2(stackNearWall.point[1])]
     : [stackX, stackZ]
-  if (hitsFloorBeamXZ(stackPt[0], stackPt[1], 0.30)) {
+  let stackWallId: string | undefined = stackNearWall?.wall.id
+
+  const isStackPointClear = (cx: number, cz: number, wall: WallSegment2D | null, alongM: number, pad: number): boolean => {
+    if (hitsAnyObstacleXZ(cx, cz, pad)) return false
+    if (wall && hitsWallOpening(wall.id, alongM, pad, false)) return false
+    if (hitsAnyWallOpeningXZ(cx, cz, Math.min(0.24, pad), false)) return false
+    return true
+  }
+
+  const initialAlong = stackNearWall ? stackNearWall.wall.lengthM * stackNearWall.t : 0
+  if (!isStackPointClear(stackPt[0], stackPt[1], stackNearWall?.wall ?? null, initialAlong, 0.28)) {
     let cleared = false
-    if (stackNearWall) {
-      const w = stackNearWall.wall
-      const baseAlong = w.lengthM * stackNearWall.t
-      for (const shift of [0.55, -0.55, 0.95, -0.95]) {
-        const along = Math.max(0.35, Math.min(w.lengthM - 0.35, baseAlong + shift))
-        const cx = round2(w.start[0] + w.ux * along)
-        const cz = round2(w.start[1] + w.uz * along)
-        if (!hitsFloorBeamXZ(cx, cz, 0.30)) {
-          stackPt = [cx, cz]
-          cleared = true
-          break
+    const orderedWalls = stackWallPool
+      .map((w) => {
+        const proj = nearestWallToPoint(stackX, stackZ, [w])!
+        return { wall: w, t: proj.t, dist: proj.distanceM }
+      })
+      .sort((a, b) => a.dist - b.dist)
+
+    // Pass 1: >= 0.28 m stud-bay clearance from headers/beams/openings; Pass 2: tighter >= 0.15 m clearance
+    for (const pad of [0.28, 0.15]) {
+      for (const cand of orderedWalls) {
+        const w = cand.wall
+        if (w.lengthM < 0.45) continue
+        const edgeMargin = Math.min(0.24, w.lengthM * 0.2)
+        const baseAlong = Math.max(edgeMargin, Math.min(w.lengthM - edgeMargin, w.lengthM * cand.t))
+        const maxSteps = Math.ceil(w.lengthM / 0.2)
+        for (let step = 0; step <= maxSteps; step++) {
+          const dirs = step === 0 ? ([0] as const) : ([1, -1] as const)
+          for (const dir of dirs) {
+            const along = baseAlong + dir * step * 0.2
+            if (along < edgeMargin || along > w.lengthM - edgeMargin) continue
+            const cx = round2(w.start[0] + w.ux * along)
+            const cz = round2(w.start[1] + w.uz * along)
+            if (isStackPointClear(cx, cz, w, along, pad)) {
+              stackPt = [cx, cz]
+              stackWallId = w.id
+              cleared = true
+              break
+            }
+          }
+          if (cleared) break
         }
+        if (cleared) break
       }
+      if (cleared) break
     }
-    // If the host wall itself runs directly over a floor girder, nudge perpendicular off the girder
+
+    // Fallback: if every wall on the level is blocked by openings/beams, place an interior pipe chase
+    // clear of ALL structural beams, headers, columns, and openings.
     if (!cleared) {
-      stackPt = nudgeOffStructuralBeams(stackPt[0], stackPt[1])
+      const [bx, bz] = stackPt
+      for (const pad of [0.28, 0.14]) {
+        for (const r of [0.35, 0.65, 0.95, 1.35, 1.8, 2.4]) {
+          const offsets: ReadonlyArray<readonly [number, number]> = [
+            [r, 0],
+            [-r, 0],
+            [0, r],
+            [0, -r],
+            [r, r],
+            [r, -r],
+            [-r, r],
+            [-r, -r],
+          ]
+          for (const [dx, dz] of offsets) {
+            const cx = round2(bx + dx)
+            const cz = round2(bz + dz)
+            if (cx < bounds.minX + 0.15 || cx > bounds.maxX - 0.15 || cz < bounds.minZ + 0.15 || cz > bounds.maxZ - 0.15) {
+              continue
+            }
+            if (isStackPointClear(cx, cz, null, 0, pad)) {
+              stackPt = [cx, cz]
+              stackWallId = undefined
+              cleared = true
+              break
+            }
+          }
+          if (cleared) break
+        }
+        if (cleared) break
+      }
+      if (!cleared) {
+        stackPt = nudgeOffStructuralBeams(stackPt[0], stackPt[1])
+        stackWallId = undefined
+      }
     }
   }
 
@@ -1253,7 +1516,7 @@ export function planPlumbingAutoPopulate(
     hasShutoffWithin6Ft: false,
     isHorizontalSanTee: false,
     isMainVentStack: true,
-    wallId: stackNearWall?.wall.id,
+    wallId: stackWallId,
   })
 
   // Main Building Drain (Stack Base -> Sewer Exit, 1/4"/ft slope, with cleanout)
