@@ -703,6 +703,35 @@ export function getFixtureDfu(kind: FixtureKind, codeEdition: CodeEdition = 'IPC
   return codeEdition === 'UPC-2021' ? spec.dfuUpc : spec.dfuIpc
 }
 
+/**
+ * IPC 2021 Table E103.3(2) Water Supply Fixture Units (WSFU) by fixture kind and occupancy.
+ * Commercial / public occupancies use flushometer water closets (10.0 WSFU) and public fixture ratings.
+ */
+const COMMERCIAL_WSFU_OVERRIDES: Readonly<
+  Partial<Record<FixtureKind, { cold: number; hot: number; total: number }>>
+> = {
+  'water-closet': { cold: 10.0, hot: 0, total: 10.0 },
+  lavatory: { cold: 1.5, hot: 1.5, total: 2.0 },
+  'kitchen-sink': { cold: 3.0, hot: 3.0, total: 4.0 },
+  'mop-sink': { cold: 2.25, hot: 2.25, total: 3.0 },
+  bathtub: { cold: 3.0, hot: 3.0, total: 4.0 },
+  shower: { cold: 1.5, hot: 1.5, total: 2.0 },
+  'tub-shower-combo': { cold: 3.0, hot: 3.0, total: 4.0 },
+  urinal: { cold: 5.0, hot: 0, total: 5.0 },
+}
+
+export function getFixtureWsfu(
+  kind: FixtureKind,
+  occupancy: OccupancyType = 'residential',
+): { cold: number; hot: number; total: number } {
+  if (occupancy === 'commercial') {
+    const pub = COMMERCIAL_WSFU_OVERRIDES[kind]
+    if (pub) return pub
+  }
+  const spec = FIXTURE_SPECS[kind]
+  return { cold: spec.wsfuCold, hot: spec.wsfuHot, total: spec.wsfuTotal }
+}
+
 export function isCtsMaterial(material: PipeMaterial): boolean {
   return (
     material === 'pex-a' ||

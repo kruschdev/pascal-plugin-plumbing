@@ -16,6 +16,7 @@ import {
 import { Group } from 'three'
 import { z } from 'zod'
 import { buildEquipmentCad } from '../cad/equipment'
+import { getEquipmentElectricalDemand } from '../ipc/framing-interop'
 import type { EquipmentKind } from '../ipc/tables'
 
 const Vec3Schema = z.tuple([z.number(), z.number(), z.number()])
@@ -72,9 +73,23 @@ export type PlumbingEquipmentNode = z.infer<typeof PlumbingEquipmentNode>
 
 export function getPlumbingEquipmentPorts(node: PlumbingEquipmentNode): NodePort[] {
   const [x, y, zPos] = node.position
+  const rot = node.rotation ?? 0
+  const cos = Math.cos(rot)
+  const sin = Math.sin(rot)
+  const rotOffset = (lx: number, lz: number): [number, number] => [
+    x + lx * cos + lz * sin,
+    zPos - lx * sin + lz * cos,
+  ]
+  const [cx, cz] = rotOffset(0.1, 0)
+  const [hx, hz] = rotOffset(-0.1, 0)
+  if (node.equipmentKind === 'gas-meter') {
+    return [
+      { id: 'gas-out', position: [x, y + 0.35, zPos], direction: [0, 1, 0], diameter: 0.75, system: 'gas' },
+    ]
+  }
   return [
-    { id: 'cold-in', position: [x + 0.1, y + 1.45, zPos], direction: [0, 1, 0], diameter: 0.75, system: 'water' },
-    { id: 'hot-out', position: [x - 0.1, y + 1.45, zPos], direction: [0, 1, 0], diameter: 0.75, system: 'water' },
+    { id: 'cold-in', position: [cx, y + 1.45, cz], direction: [0, 1, 0], diameter: 0.75, system: 'water' },
+    { id: 'hot-out', position: [hx, y + 1.45, hz], direction: [0, 1, 0], diameter: 0.75, system: 'water' },
   ]
 }
 
@@ -151,6 +166,7 @@ export const plumbingEquipmentRenderDefinition: NodeDefinition<typeof PlumbingEq
     hasDrainPan: true,
     hasTpDischarge: true,
     hasExpansionTank: true,
+    electricalDemand: getEquipmentElectricalDemand('water-heater-tank-electric', 4500),
   }),
   capabilities: {
     selectable: { hitVolume: 'bbox' },

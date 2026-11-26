@@ -15,6 +15,7 @@ import {
 import { Group } from 'three'
 import { z } from 'zod'
 import { buildFixtureCad } from '../cad/fixtures'
+import { getFixtureElectricalDemand } from '../ipc/framing-interop'
 import { FIXTURE_SPECS, type FixtureKind } from '../ipc/tables'
 import { ElectricalDemandSchema } from './equipment'
 
@@ -78,16 +79,32 @@ export const PlumbingFixtureNode = BaseNode.extend({
 
 export type PlumbingFixtureNode = z.infer<typeof PlumbingFixtureNode>
 
+function rotateLocal2D(
+  cx: number,
+  cz: number,
+  lx: number,
+  lz: number,
+  rot: number,
+): [number, number] {
+  const cos = Math.cos(rot)
+  const sin = Math.sin(rot)
+  return [cx + lx * cos + lz * sin, cz - lx * sin + lz * cos]
+}
+
 export function getPlumbingFixturePorts(node: PlumbingFixtureNode): NodePort[] {
   const [x, y, zPos] = node.position
+  const rot = node.rotation ?? 0
+  const backDir: [number, number, number] = [-Math.sin(rot), 0, -Math.cos(rot)]
   const ports: NodePort[] = []
   if (node.drainSize) {
     ports.push({ id: 'drain', position: [x, Math.max(0, y - 0.15), zPos], direction: [0, -1, 0], diameter: 2, system: 'dwv' })
   }
   if (node.supplySize) {
-    ports.push({ id: 'cold', position: [x + 0.08, y, zPos], direction: [0, 0, -1], diameter: 0.5, system: 'water' })
+    const [cx, cz] = rotateLocal2D(x, zPos, 0.08, 0, rot)
+    ports.push({ id: 'cold', position: [cx, y, cz], direction: backDir, diameter: 0.5, system: 'water' })
     if (node.wsfuHot > 0) {
-      ports.push({ id: 'hot', position: [x - 0.08, y, zPos], direction: [0, 0, -1], diameter: 0.5, system: 'water' })
+      const [hx, hz] = rotateLocal2D(x, zPos, -0.08, 0, rot)
+      ports.push({ id: 'hot', position: [hx, y, hz], direction: backDir, diameter: 0.5, system: 'water' })
     }
   }
   return ports
@@ -101,13 +118,14 @@ export function buildPlumbingFixtureGeometry(
   group.name = `plumbing-fixture-${node.id}`
   const cad = buildFixtureCad({ fixtureKind: node.fixtureKind as FixtureKind })
   const spec = FIXTURE_SPECS[node.fixtureKind as FixtureKind]
+  // Offset CAD by nominal rough-in height (not -node.position[1]) so Y-axis dragging moves the 3D fixture naturally
   if (
     spec &&
     node.fixtureKind !== 'clothes-washer' &&
     node.fixtureKind !== 'hose-bibb' &&
     node.fixtureKind !== 'garbage-disposal'
   ) {
-    cad.position.y = -node.position[1]
+    cad.position.y = -spec.roughInHeightM
   }
   group.add(cad)
   return group
@@ -120,27 +138,30 @@ export function buildPlumbingFixtureFloorplan(
   const view = ctx.viewState
   const selected = (view?.selected || view?.highlighted) ?? false
   const [cx, , cz] = node.position
+  const rot = node.rotation ?? 0
   const spec = FIXTURE_SPECS[node.fixtureKind as FixtureKind]
   const hw = (spec?.dimensionsM[0] ?? 0.5) / 2
   const hd = (spec?.dimensionsM[2] ?? 0.5) / 2
   const baseStroke = node.fixtureKind === 'hose-bibb' ? '#2563eb' : '#0ea5e9'
   const stroke = selected && view?.palette ? view.palette.selectedStroke : baseStroke
 
+  const p0 = rotateLocal2D(cx, cz, -hw, -hd, rot)
+  const p1 = rotateLocal2D(cx, cz, hw, -hd, rot)
+  const p2 = rotateLocal2D(cx, cz, hw, hd, rot)
+  const p3 = rotateLocal2D(cx, cz, -hw, hd, rot)
+  const d0 = rotateLocal2D(cx, cz, -hw * 0.5, -hd * 0.5, rot)
+  const d1 = rotateLocal2D(cx, cz, hw * 0.5, hd * 0.5, rot)
+
   const children: FloorplanGeometry[] = [
     {
       kind: 'polygon',
-      points: [
-        [cx - hw, cz - hd],
-        [cx + hw, cz - hd],
-        [cx + hw, cz + hd],
-        [cx - hw, cz + hd],
-      ],
+      points: [p0, p1, p2, p3],
       fill: baseStroke,
       fillOpacity: 0.12,
       stroke,
       strokeWidth: 0.02,
     },
-    { kind: 'line', x1: cx - hw * 0.5, y1: cz - hd * 0.5, x2: cx + hw * 0.5, y2: cz + hd * 0.5, stroke, strokeWidth: 0.015 },
+    { kind: 'line', x1: d0[0], y1: d0[1], x2: d1[0], y2: d1[1], stroke, strokeWidth: 0.015 },
   ]
   if (selected) {
     children.push({ kind: 'move-handle', point: [cx, cz] })
@@ -175,6 +196,7 @@ export const plumbingFixtureRenderDefinition: NodeDefinition<typeof PlumbingFixt
     supplySize: '1/2"',
     hasVacuumBreaker: true,
     hasPTrap: true,
+    electricalDemand: getFixtureElectricalDemand('lavatory'),
   }),
   capabilities: {
     selectable: { hitVolume: 'bbox' },
@@ -185,7 +207,7 @@ export const plumbingFixtureRenderDefinition: NodeDefinition<typeof PlumbingFixt
     snappable: {},
   },
   geometry: buildPlumbingFixtureGeometry,
-  geometryKey: (n) => JSON.stringify([n.fixtureKind, n.position[1]]),
+  geometryKey: (n) => JSON.stringify([n.fixtureKind]),
   ports: getPlumbingFixturePorts,
   floorplan: buildPlumbingFixtureFloorplan,
   presentation: {

@@ -4,12 +4,13 @@
  */
 
 import type { SceneNodeLike } from './framing-interop'
-import { buildPlumbingSchedule } from './schedule'
+import { type PlumbingSchedule, buildPlumbingSchedule } from './schedule'
 import {
   type CodeEdition,
   type EquipmentKind,
   type FixtureKind,
   type ManifoldKind,
+  type OccupancyType,
   type PipeMaterial,
   type PipeNominalSize,
   round2,
@@ -20,6 +21,9 @@ export type PlumbingPricingOptions = {
   materialMarkupPct?: number
   salesTaxPct?: number
   codeEdition?: CodeEdition
+  occupancy?: OccupancyType
+  /** Optional precomputed schedule to avoid redundant scene scans. */
+  schedule?: PlumbingSchedule
 }
 
 export type PlumbingBomLine = {
@@ -123,8 +127,14 @@ export function buildPlumbingBom(
   nodes: Readonly<Record<string, SceneNodeLike>>,
   options: PlumbingPricingOptions = {},
 ): PlumbingBomResult {
-  const { laborRateUsd = 115, materialMarkupPct = 0, salesTaxPct = 0, codeEdition = 'IPC-2021' } = options
-  const schedule = buildPlumbingSchedule(nodes, { codeEdition })
+  const {
+    laborRateUsd = 115,
+    materialMarkupPct = 0,
+    salesTaxPct = 0,
+    codeEdition = 'IPC-2021',
+    occupancy = 'residential',
+  } = options
+  const schedule = options.schedule ?? buildPlumbingSchedule(nodes, { codeEdition, occupancy })
   const all = Object.values(nodes)
   const lines: PlumbingBomLine[] = []
 
@@ -218,7 +228,22 @@ export function buildPlumbingBom(
     const dwvFittings = Math.ceil(fixTotal * 3 + totalDwvFt / 10)
     const supplyFittings = Math.ceil(fixTotal * 4 + totalSupplyFt / 15)
     const hangers = Math.ceil(totalPipeFt / 4)
-    const angleStops = fixTotal * 2
+    const NO_ANGLE_STOP_FIXTURES = new Set<FixtureKind>([
+      'bathtub',
+      'shower',
+      'tub-shower-combo',
+      'floor-drain',
+      'hose-bibb',
+      'garbage-disposal',
+      'grease-interceptor',
+      'urinal',
+      'mop-sink',
+      'drinking-fountain',
+    ])
+    const angleStops = schedule.fixtures.reduce((sum, f) => {
+      if (NO_ANGLE_STOP_FIXTURES.has(f.fixtureKind)) return sum
+      return sum + (f.wsfuCold > 0 ? 1 : 0) + (f.wsfuHot > 0 ? 1 : 0)
+    }, 0)
 
     addLine('Fittings & Accessories', 'DWV Fittings (Wyes, Combos, Sweeps, San-Tees)', 'ea', dwvFittings, 7.5, dwvFittings * 0.08)
     addLine('Fittings & Accessories', 'Supply Fittings & Crimp/Expansion Rings', 'ea', supplyFittings, 4.2, supplyFittings * 0.05)
@@ -268,6 +293,14 @@ export function formatPlumbingBomCsv(bom: PlumbingBomResult): string {
       .map(csvEscape)
       .join(','),
   )
-  rows.push(['Summary', 'Grand Total', '', '', '', bom.subtotalMaterialUsd.toFixed(2), bom.totalLaborHours.toFixed(2), bom.subtotalLaborUsd.toFixed(2), bom.grandTotalUsd.toFixed(2)].join(','))
+  rows.push(['Summary', 'Material Subtotal', '', '', '', bom.subtotalMaterialUsd.toFixed(2), '', '', bom.subtotalMaterialUsd.toFixed(2)].join(','))
+  if (bom.markupUsd > 0) {
+    rows.push(['Summary', 'Material Markup', '', '', '', bom.markupUsd.toFixed(2), '', '', bom.markupUsd.toFixed(2)].join(','))
+  }
+  if (bom.taxUsd > 0) {
+    rows.push(['Summary', 'Sales Tax', '', '', '', bom.taxUsd.toFixed(2), '', '', bom.taxUsd.toFixed(2)].join(','))
+  }
+  rows.push(['Summary', 'Labor Subtotal', '', '', '', '', bom.totalLaborHours.toFixed(2), bom.subtotalLaborUsd.toFixed(2), bom.subtotalLaborUsd.toFixed(2)].join(','))
+  rows.push(['Summary', 'Grand Total', '', '', '', (bom.subtotalMaterialUsd + bom.markupUsd + bom.taxUsd).toFixed(2), bom.totalLaborHours.toFixed(2), bom.subtotalLaborUsd.toFixed(2), bom.grandTotalUsd.toFixed(2)].join(','))
   return [header.join(','), ...rows].join('\n')
 }

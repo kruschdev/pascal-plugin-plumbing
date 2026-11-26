@@ -5,12 +5,15 @@
 
 import { useScene, useViewer } from '@pascal-app/editor'
 import { useMemo, useState } from 'react'
+import type { ManifoldPortAssignment } from '../cad/manifold-interior'
 import { auditScenePlumbing } from '../ipc/audit'
 import {
+  type FramingPenetration,
   type SceneNodeLike,
   type Vec3,
   computePipeFramingPenetrations,
   extractBonesPlumbingContext,
+  resolveNodeLevelId,
 } from '../ipc/framing-interop'
 import { buildPlumbingBom, formatPlumbingBomCsv } from '../ipc/pricing'
 import { extractWallSegments } from '../ipc/routing'
@@ -27,6 +30,8 @@ export default function PlumbingScheduleView() {
     occupancy,
     activeTab,
     setActiveTab,
+    selectedManifoldId,
+    setSelectedManifoldId,
     manifoldViewMode,
     setManifoldViewMode,
   } = usePlumbingUi()
@@ -37,19 +42,35 @@ export default function PlumbingScheduleView() {
   const [copiedMsg, setCopiedMsg] = useState<string | null>(null)
 
   const record = nodes as unknown as Readonly<Record<string, SceneNodeLike>>
-  const schedule = useMemo(() => buildPlumbingSchedule(record, { codeEdition, occupancy }), [record, codeEdition, occupancy])
-  const audit = useMemo(() => auditScenePlumbing(record, { codeEdition }), [record, codeEdition])
+  const schedule = useMemo(
+    () => buildPlumbingSchedule(record, { codeEdition, occupancy }),
+    [record, codeEdition, occupancy],
+  )
+  const audit = useMemo(
+    () => auditScenePlumbing(record, { codeEdition, occupancy }),
+    [record, codeEdition, occupancy],
+  )
   const bom = useMemo(
-    () => buildPlumbingBom(record, { codeEdition, laborRateUsd, materialMarkupPct, salesTaxPct }),
-    [record, codeEdition, laborRateUsd, materialMarkupPct, salesTaxPct],
+    () =>
+      buildPlumbingBom(record, {
+        codeEdition,
+        occupancy,
+        laborRateUsd,
+        materialMarkupPct,
+        salesTaxPct,
+        schedule,
+      }),
+    [record, codeEdition, occupancy, laborRateUsd, materialMarkupPct, salesTaxPct, schedule],
   )
 
-  const penetrations = useMemo(() => {
-    const walls = extractWallSegments(record, null)
-    const bones = extractBonesPlumbingContext(record, null)
-    const out = []
+  const penetrations = useMemo<FramingPenetration[]>(() => {
+    if (activeTab !== 'penetrations') return []
+    const out: FramingPenetration[] = []
     for (const n of Object.values(record)) {
       if (n.type !== 'plumbing:pipe-run' || !Array.isArray(n.path)) continue
+      const lvlId = resolveNodeLevelId(record, n)
+      const walls = extractWallSegments(record, lvlId)
+      const bones = extractBonesPlumbingContext(record, lvlId)
       out.push(
         ...computePipeFramingPenetrations({
           pipeRunId: n.id,
@@ -62,12 +83,42 @@ export default function PlumbingScheduleView() {
       )
     }
     return out
-  }, [record])
+  }, [record, activeTab])
 
-  const firstManifold = useMemo(
-    () => Object.values(record).find((n) => n.type === 'plumbing:manifold') ?? null,
+  const manifolds = useMemo(
+    () => Object.values(record).filter((n) => n.type === 'plumbing:manifold'),
     [record],
   )
+  const activeManifold = useMemo(
+    () => (selectedManifoldId ? manifolds.find((m) => m.id === selectedManifoldId) : undefined) ?? manifolds[0] ?? null,
+    [manifolds, selectedManifoldId],
+  )
+  const activeManifoldPorts = useMemo<ManifoldPortAssignment[]>(() => {
+    if (!activeManifold || activeTab !== 'manifold') return []
+    const connectedRuns = Object.values(record).filter(
+      (n) =>
+        n.type === 'plumbing:pipe-run' &&
+        (n.sourceNodeId === activeManifold.id || n.targetNodeId === activeManifold.id),
+    )
+    const ports: ManifoldPortAssignment[] = []
+    let hotIdx = 0
+    let coldIdx = 0
+    let gasIdx = 0
+    for (const r of connectedRuns) {
+      const sys = String(r.system ?? '')
+      const side: 'hot' | 'cold' | 'gas' =
+        sys === 'hot-water' || sys === 'hot-recirc' ? 'hot' : sys === 'fuel-gas' ? 'gas' : 'cold'
+      const portIndex = side === 'hot' ? hotIdx++ : side === 'gas' ? gasIdx++ : coldIdx++
+      ports.push({
+        portIndex,
+        side,
+        label: typeof r.name === 'string' && r.name ? r.name : r.id,
+        pipeSize: String(r.nominalSize ?? '1/2"'),
+        active: true,
+      })
+    }
+    return ports
+  }, [record, activeManifold, activeTab])
 
   const copyCsv = (label: string, csv: string) => {
     navigator.clipboard?.writeText(csv).catch(() => {})
@@ -79,7 +130,7 @@ export default function PlumbingScheduleView() {
     ['fixtures', `Fixtures (${schedule.fixtures.length})`],
     ['loads', 'Loads & Power'],
     ['audit', `IPC Audit (${audit.errorCount}/${audit.warningCount})`],
-    ['penetrations', `Drill List (${penetrations.length})`],
+    ['penetrations', activeTab === 'penetrations' ? `Drill List (${penetrations.length})` : 'Drill List'],
     ['bom', `BOM ($${Math.round(bom.grandTotalUsd).toLocaleString()})`],
     ['manifold', '3D Manifold Cutaway'],
   ]
@@ -304,21 +355,58 @@ export default function PlumbingScheduleView() {
               ))}
             </tbody>
           </table>
-          <div style={{ textAlign: 'right', fontSize: 14, fontWeight: 700 }}>
-            Grand Total: ${bom.grandTotalUsd.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 3, fontSize: 12 }}>
+            <div>
+              Material Subtotal: <strong>${bom.subtotalMaterialUsd.toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong>
+            </div>
+            {bom.markupUsd > 0 && (
+              <div>
+                Markup ({materialMarkupPct}%): <strong>${bom.markupUsd.toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong>
+              </div>
+            )}
+            {bom.taxUsd > 0 && (
+              <div>
+                Sales Tax ({salesTaxPct}%): <strong>${bom.taxUsd.toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong>
+              </div>
+            )}
+            <div>
+              Labor Subtotal ({bom.totalLaborHours}h):{' '}
+              <strong>${bom.subtotalLaborUsd.toLocaleString(undefined, { minimumFractionDigits: 2 })}</strong>
+            </div>
+            <div style={{ fontSize: 14, fontWeight: 700, marginTop: 4 }}>
+              Grand Total: ${bom.grandTotalUsd.toLocaleString(undefined, { minimumFractionDigits: 2 })}
+            </div>
           </div>
         </div>
       )}
 
       {/* Tab 6: 3D PEX Manifold & Wet-Wall Cutaway */}
       {activeTab === 'manifold' && (
-        <ManifoldCutawayView
-          manifoldKind={((firstManifold?.manifoldKind as ManifoldKind) || 'pex-homerun')}
-          portCount={typeof firstManifold?.portCount === 'number' ? firstManifold.portCount : 12}
-          viewMode={manifoldViewMode}
-          ports={[]}
-          onChangeViewMode={setManifoldViewMode}
-        />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          {manifolds.length > 1 && (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', fontSize: 11 }}>
+              <strong>Manifold:</strong>
+              <select
+                value={activeManifold?.id ?? ''}
+                onChange={(e) => setSelectedManifoldId(e.target.value || null)}
+                style={{ padding: '3px 6px', borderRadius: 5, border: '1px solid rgba(255,255,255,0.2)', background: 'transparent', color: 'inherit', fontSize: 11 }}
+              >
+                {manifolds.map((m) => (
+                  <option key={m.id} value={m.id}>
+                    {String(m.name ?? m.id)} ({String(m.manifoldKind ?? 'pex-homerun')})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+          <ManifoldCutawayView
+            manifoldKind={((activeManifold?.manifoldKind as ManifoldKind) || 'pex-homerun')}
+            portCount={typeof activeManifold?.portCount === 'number' ? activeManifold.portCount : 12}
+            viewMode={manifoldViewMode}
+            ports={activeManifoldPorts}
+            onChangeViewMode={setManifoldViewMode}
+          />
+        </div>
       )}
     </div>
   )

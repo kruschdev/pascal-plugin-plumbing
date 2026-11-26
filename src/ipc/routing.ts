@@ -162,10 +162,24 @@ export function measureDrainPathSlope(path: ReadonlyArray<Vec3>): {
   }
 }
 
+const wallSegmentsCache = new WeakMap<
+  Readonly<Record<string, SceneNodeLike>>,
+  Map<string, WallSegment2D[]>
+>()
+
 export function extractWallSegments(
   nodes: Readonly<Record<string, SceneNodeLike>>,
   levelId: string | null = null,
 ): WallSegment2D[] {
+  const key = levelId ?? '__all__'
+  let byLevel = wallSegmentsCache.get(nodes)
+  if (!byLevel) {
+    byLevel = new Map()
+    wallSegmentsCache.set(nodes, byLevel)
+  }
+  const cached = byLevel.get(key)
+  if (cached) return cached
+
   const walls: WallSegment2D[] = []
   for (const n of Object.values(nodes)) {
     if (n.type !== 'wall' || !belongsToLevel(nodes, n, levelId)) continue
@@ -191,6 +205,7 @@ export function extractWallSegments(
       nz: ux,
     })
   }
+  byLevel.set(key, walls)
   return walls
 }
 
@@ -306,7 +321,45 @@ export function extractPlumbingObstacles(
       ? ([Number(n.position[0]), Number(n.position[1]), Number(n.position[2])] as Vec3)
       : null
 
-    if (n.type === 'column' && pos) {
+    if (n.type === 'structural:column' && pos) {
+      const w = (typeof n.widthIn === 'number' ? n.widthIn : 5.5) * INCHES_TO_METERS
+      const d = (typeof n.depthIn === 'number' ? n.depthIn : 5.5) * INCHES_TO_METERS
+      const h = typeof n.heightM === 'number' ? n.heightM : levelH
+      obstacles.push({
+        id: n.id,
+        category: 'structural',
+        label: `Structural column ${String(n.designation ?? n.columnType ?? '')} (${n.name ?? n.id})`.trim(),
+        box: {
+          minX: pos[0] - w / 2,
+          maxX: pos[0] + w / 2,
+          minY: pos[1],
+          maxY: pos[1] + h,
+          minZ: pos[2] - d / 2,
+          maxZ: pos[2] + d / 2,
+        },
+      })
+    } else if (n.type === 'structural:beam' && Array.isArray(n.start) && Array.isArray(n.end)) {
+      const sx = Number(n.start[0])
+      const sz = Number(n.start[1])
+      const ex = Number(n.end[0])
+      const ez = Number(n.end[1])
+      const w = (typeof n.widthIn === 'number' ? n.widthIn : 3.5) * INCHES_TO_METERS
+      const h = (typeof n.depthIn === 'number' ? n.depthIn : 11.875) * INCHES_TO_METERS
+      const y = typeof n.elevationY === 'number' ? Number(n.elevationY) : levelH - h / 2
+      obstacles.push({
+        id: n.id,
+        category: 'structural',
+        label: `Structural beam ${String(n.designation ?? n.beamType ?? '')} (${n.name ?? n.id})`.trim(),
+        box: {
+          minX: Math.min(sx, ex) - w / 2,
+          maxX: Math.max(sx, ex) + w / 2,
+          minY: y - h / 2,
+          maxY: y + h / 2,
+          minZ: Math.min(sz, ez) - w / 2,
+          maxZ: Math.max(sz, ez) + w / 2,
+        },
+      })
+    } else if (n.type === 'column' && pos) {
       const w = typeof n.width === 'number' ? n.width : 0.25
       const d = typeof n.depth === 'number' ? n.depth : 0.25
       const h = typeof n.height === 'number' ? n.height : levelH
@@ -345,22 +398,26 @@ export function extractPlumbingObstacles(
         },
       })
     } else if ((n.type === 'electrical:panel' || n.type === 'electrical:transformer') && pos) {
-      // NEC 110.26(E)(1)(a): Dedicated space equal to width & depth of panel extending from floor to 6 ft above (or ceiling)
+      // NEC 110.26(E)(1)(a): Dedicated space equal to width & depth of panel extending from floor (y = 0) to 6 ft above (or ceiling)
       const w = typeof n.width === 'number' ? n.width : 0.42
       const d = typeof n.depth === 'number' ? n.depth : 0.16
-      const halfSpan = Math.max(w, d) / 2 + 0.05
+      const rot = typeof n.rotation === 'number' ? n.rotation : 0
+      const cosR = Math.abs(Math.cos(rot))
+      const sinR = Math.abs(Math.sin(rot))
+      const halfX = (w * cosR + d * sinR) / 2 + 0.03
+      const halfZ = (w * sinR + d * cosR) / 2 + 0.03
       const panelTopY = pos[1] + (typeof n.height === 'number' ? n.height / 2 : 0.46)
       obstacles.push({
         id: n.id,
         category: 'electrical-dedicated-space',
         label: `NEC 110.26(E) Dedicated Space (${n.name ?? n.id})`,
         box: {
-          minX: pos[0] - halfSpan,
-          maxX: pos[0] + halfSpan,
-          minY: panelTopY,
-          maxY: Math.max(levelH + 0.6, panelTopY + 1.83), // 6 ft above panel
-          minZ: pos[2] - halfSpan,
-          maxZ: pos[2] + halfSpan,
+          minX: pos[0] - halfX,
+          maxX: pos[0] + halfX,
+          minY: 0,
+          maxY: Math.max(levelH + 0.6, panelTopY + 1.83), // Floor to 6 ft above panel
+          minZ: pos[2] - halfZ,
+          maxZ: pos[2] + halfZ,
         },
       })
     }
@@ -444,16 +501,16 @@ export function nearestWallToPoint(
 }
 
 /**
- * Deduplicate consecutive nearly identical waypoints while preserving 1 mm (0.001 m) elevation precision
- * so 1/4"/ft (2.08%) gravity slopes are never quantized below code minimums on short horizontal legs.
+ * Deduplicate consecutive nearly identical waypoints while preserving 0.1 mm (0.0001 m) elevation precision
+ * so 1/4"/ft (2.08%) gravity slopes are never quantized below code minimums even on short horizontal legs.
  */
 function cleanPath(pts: Vec3[]): Vec3[] {
-  const r3 = (v: number) => Math.round(v * 1000) / 1000
+  const r4 = (v: number) => Math.round(v * 10000) / 10000
   const out: Vec3[] = []
   for (const p of pts) {
     const prev = out[out.length - 1]
     if (!prev || Math.hypot(p[0] - prev[0], p[1] - prev[1], p[2] - prev[2]) > 0.008) {
-      out.push([r3(p[0]), r3(p[1]), r3(p[2])])
+      out.push([r4(p[0]), r4(p[1]), r4(p[2])])
     }
   }
   return out
@@ -461,7 +518,8 @@ function cleanPath(pts: Vec3[]): Vec3[] {
 
 /**
  * Route a gravity-sloped DWV branch from a fixture rough-in to a stack/collector point.
- * Guarantees continuous downward fall at >= required IPC slope (1/4"/ft for <= 2.5", 1/8"/ft for >= 3").
+ * Guarantees continuous downward fall at >= required IPC slope (1/4"/ft for <= 2.5", 1/8"/ft for >= 3")
+ * and automatically detours horizontally around structural columns, beams, and NEC 110.26(E) electrical spaces.
  */
 export function routeDwvDrainRun(params: {
   from: Vec3
@@ -474,6 +532,7 @@ export function routeDwvDrainRun(params: {
   path: Vec3[]
   slopeInPerFt: number
   lengthFt: number
+  detoured: boolean
   clashes: PlumbingObstacle[]
 } {
   const { from, to, nominalSize, foundationType = 'crawlspace', obstacles = [] } = params
@@ -483,39 +542,79 @@ export function routeDwvDrainRun(params: {
 
   const underFloorY = foundationType === 'slab' ? -0.35 : -0.24
   const startY = Math.min(from[1], underFloorY)
+  const pipeRadiusM = (3 * INCHES_TO_METERS) / 2
 
-  // Build Manhattan horizontal L-path under floor with monotonic gravity drop
-  const midX = to[0]
-  const midZ = from[2]
-  const leg1M = Math.hypot(midX - from[0], midZ - from[2])
-  const leg2M = Math.hypot(to[0] - midX, to[2] - midZ)
-
-  const midY = startY - leg1M * slopeRatio
-  const endY = Math.min(to[1], midY - leg2M * slopeRatio)
-
-  const pts: Vec3[] = [from]
-  if (from[1] > startY + 0.02) {
-    // Vertical fixture drop into wet wall / under-floor sanitary tee
-    pts.push([from[0], startY, from[2]])
+  const buildSlopedCandidate = (horizWaypoints: ReadonlyArray<readonly [number, number]>): Vec3[] => {
+    const pts: Vec3[] = [from]
+    if (from[1] > startY + 0.02) {
+      pts.push([from[0], startY, from[2]])
+    }
+    let curX = from[0]
+    let curZ = from[2]
+    let curY = startY
+    for (let i = 0; i < horizWaypoints.length; i++) {
+      const [wx, wz] = horizWaypoints[i]!
+      const leg = Math.hypot(wx - curX, wz - curZ)
+      const isLast = i === horizWaypoints.length - 1
+      if (!isLast && leg < 0.15) continue
+      curY -= leg * slopeRatio
+      const y = isLast ? Math.min(to[1], curY) : curY
+      pts.push([wx, y, wz])
+      curX = wx
+      curZ = wz
+      curY = y
+    }
+    return cleanPath(pts)
   }
-  if (leg1M > 0.04) {
-    pts.push([midX, midY, midZ])
-  }
-  pts.push([to[0], endY, to[2]])
 
-  const path = cleanPath(pts)
-  const clashes = detectPlumbingClashes(path, obstacles, (3 * INCHES_TO_METERS) / 2)
+  const primary = buildSlopedCandidate([
+    [to[0], from[2]],
+    [to[0], to[2]],
+  ])
+  let bestPath = primary
+  let bestClashes = detectPlumbingClashes(primary, obstacles, pipeRadiusM)
+  let detoured = false
+
+  if (bestClashes.length > 0) {
+    const midX = (from[0] + to[0]) / 2
+    const midZ = (from[2] + to[2]) / 2
+    const candidates: Array<Array<readonly [number, number]>> = [
+      [[from[0], to[2]], [to[0], to[2]]],
+      [[to[0], from[2] + 0.55], [to[0], to[2]]],
+      [[to[0], from[2] - 0.55], [to[0], to[2]]],
+      [[from[0] + 0.55, to[2]], [to[0], to[2]]],
+      [[from[0] - 0.55, to[2]], [to[0], to[2]]],
+      [[midX + 0.75, from[2] + 0.75], [to[0] + 0.75, to[2]], [to[0], to[2]]],
+      [[midX - 0.75, from[2] - 0.75], [to[0] - 0.75, to[2]], [to[0], to[2]]],
+      [[to[0] + 0.95, from[2]], [to[0] + 0.95, to[2]], [to[0], to[2]]],
+      [[to[0] - 0.95, from[2]], [to[0] - 0.95, to[2]], [to[0], to[2]]],
+      [[from[0], to[2] + 0.95], [to[0], to[2] + 0.95], [to[0], to[2]]],
+      [[from[0], to[2] - 0.95], [to[0], to[2] - 0.95], [to[0], to[2]]],
+    ]
+    for (const wp of candidates) {
+      const cand = buildSlopedCandidate(wp)
+      const c = detectPlumbingClashes(cand, obstacles, pipeRadiusM)
+      if (c.length < bestClashes.length) {
+        bestPath = cand
+        bestClashes = c
+        detoured = true
+        if (c.length === 0) break
+      }
+    }
+  }
+
   return {
-    path,
+    path: bestPath,
     slopeInPerFt,
-    lengthFt: round2(polylineLengthM(path) * METERS_TO_FEET),
-    clashes,
+    lengthFt: round2(polylineLengthM(bestPath) * METERS_TO_FEET),
+    detoured,
+    clashes: bestClashes,
   }
 }
 
 /**
  * Route a dry re-vent from a fixture wet wall up to >= 6" above flood-level rim (IPC 905.5)
- * and horizontally over to the main vent stack.
+ * and horizontally over to the main vent stack, detouring around structural & NEC 110.26(E) obstacles.
  */
 export function routeVentRun(params: {
   from: Vec3
@@ -527,27 +626,58 @@ export function routeVentRun(params: {
   path: Vec3[]
   tieInHeightM: number
   lengthFt: number
+  detoured: boolean
   clashes: PlumbingObstacle[]
 } {
   const { from, stackPoint, floodRimHeightM, ceilingHeightM = 2.6, obstacles = [] } = params
   // IPC 905.5: horizontal vent tie-in MUST be >= 6" (0.1524 m) above flood-level rim; route in upper wall/attic
   const minTieInY = floodRimHeightM + 6 * INCHES_TO_METERS + 0.1
   const tieInHeightM = Math.max(minTieInY, ceilingHeightM - 0.15)
-  const midX = stackPoint[0]
-  const midZ = from[2]
 
-  const path = cleanPath([
-    from,
-    [from[0], tieInHeightM, from[2]],
-    [midX, tieInHeightM, midZ],
-    [stackPoint[0], tieInHeightM, stackPoint[1]],
+  const buildVentCandidate = (waypoints: ReadonlyArray<readonly [number, number]>): Vec3[] => {
+    const pts: Vec3[] = [from, [from[0], tieInHeightM, from[2]]]
+    for (const [wx, wz] of waypoints) {
+      pts.push([wx, tieInHeightM, wz])
+    }
+    return cleanPath(pts)
+  }
+
+  const primary = buildVentCandidate([
+    [stackPoint[0], from[2]],
+    [stackPoint[0], stackPoint[1]],
   ])
-  const clashes = detectPlumbingClashes(path, obstacles, 0.03)
+  let bestPath = primary
+  let bestClashes = detectPlumbingClashes(primary, obstacles, 0.03)
+  let detoured = false
+
+  if (bestClashes.length > 0) {
+    const candidates: Array<Array<readonly [number, number]>> = [
+      [[from[0], stackPoint[1]], [stackPoint[0], stackPoint[1]]],
+      [[stackPoint[0], from[2] + 0.55], [stackPoint[0], stackPoint[1]]],
+      [[stackPoint[0], from[2] - 0.55], [stackPoint[0], stackPoint[1]]],
+      [[from[0] + 0.55, stackPoint[1]], [stackPoint[0], stackPoint[1]]],
+      [[from[0] - 0.55, stackPoint[1]], [stackPoint[0], stackPoint[1]]],
+      [[stackPoint[0] + 0.95, from[2]], [stackPoint[0] + 0.95, stackPoint[1]], [stackPoint[0], stackPoint[1]]],
+      [[stackPoint[0] - 0.95, from[2]], [stackPoint[0] - 0.95, stackPoint[1]], [stackPoint[0], stackPoint[1]]],
+    ]
+    for (const wp of candidates) {
+      const cand = buildVentCandidate(wp)
+      const c = detectPlumbingClashes(cand, obstacles, 0.03)
+      if (c.length < bestClashes.length) {
+        bestPath = cand
+        bestClashes = c
+        detoured = true
+        if (c.length === 0) break
+      }
+    }
+  }
+
   return {
-    path,
+    path: bestPath,
     tieInHeightM: round2(tieInHeightM),
-    lengthFt: round2(polylineLengthM(path) * METERS_TO_FEET),
-    clashes,
+    lengthFt: round2(polylineLengthM(bestPath) * METERS_TO_FEET),
+    detoured,
+    clashes: bestClashes,
   }
 }
 

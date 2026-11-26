@@ -78,6 +78,7 @@ export const plumbingPipeRunParametrics: ParametricDescriptor<PlumbingPipeRunNod
       label: 'Slope, Loads & Framing Bore Visualization',
       fields: [
         { key: 'slopeInPerFt', kind: 'number', unit: 'in/ft', min: 0, max: 2, step: 0.125 },
+        { key: 'trapArmLengthFt', kind: 'number', unit: 'ft', min: 0, max: 50, step: 0.5 },
         { key: 'dfuLoad', kind: 'number', unit: 'DFU', min: 0, max: 1000, step: 1 },
         { key: 'wsfuLoad', kind: 'number', unit: 'WSFU', min: 0, max: 1000, step: 0.5 },
         { key: 'gasBtuh', kind: 'number', unit: 'BTU/h', min: 0, max: 2000000, step: 5000 },

@@ -2,9 +2,9 @@ import { describe, expect, test } from 'bun:test'
 import { Box3 } from 'three'
 import { PLUMBING_CAD_CATALOG, buildPipeRunCad, buildPlumbingCadPart } from '../cad/catalog'
 
-describe('42-Model Clean-Room MIT 3D Plumbing CAD Library', () => {
-  test('catalog contains all 42 parts and each builds non-empty 3D geometry with positive bounds', () => {
-    expect(PLUMBING_CAD_CATALOG.length).toBe(42)
+describe('47-Model Clean-Room MIT 3D Plumbing CAD Library', () => {
+  test('catalog contains all 47 parts and each builds non-empty 3D geometry with positive bounds', () => {
+    expect(PLUMBING_CAD_CATALOG.length).toBe(47)
     const seenIds = new Set<string>()
 
     for (const part of PLUMBING_CAD_CATALOG) {

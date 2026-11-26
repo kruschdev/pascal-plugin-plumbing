@@ -6,8 +6,11 @@
 import { useEffect, useRef } from 'react'
 import {
   AmbientLight,
+  type BufferGeometry,
   Color,
   DirectionalLight,
+  type Material,
+  Mesh,
   PerspectiveCamera,
   Scene,
   WebGLRenderer,
@@ -96,7 +99,23 @@ export default function ManifoldCutawayView({
       renderer.domElement.removeEventListener('pointerdown', onDown)
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)
+      const geometries = new Set<BufferGeometry>()
+      const materials = new Set<Material>()
+      model.traverse((obj) => {
+        if (obj instanceof Mesh) {
+          if (obj.geometry) geometries.add(obj.geometry as BufferGeometry)
+          if (Array.isArray(obj.material)) {
+            for (const m of obj.material) materials.add(m as Material)
+          } else if (obj.material) {
+            materials.add(obj.material as Material)
+          }
+        }
+      })
+      for (const geo of geometries) geo.dispose()
+      for (const mat of materials) mat.dispose()
+      scene.clear()
       renderer.dispose()
+      el.innerHTML = ''
     }
   }, [manifoldKind, portCount, viewMode, ports])
 

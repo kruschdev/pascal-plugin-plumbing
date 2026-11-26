@@ -22,6 +22,7 @@ import {
   type SceneNodeLike,
   computePipeFramingPenetrations,
   extractBonesPlumbingContext,
+  resolveNodeLevelId,
 } from '../ipc/framing-interop'
 import { extractWallSegments } from '../ipc/routing'
 import type { PipeMaterial, PipeNominalSize, PlumbingSystem } from '../ipc/tables'
@@ -75,6 +76,8 @@ export const PlumbingPipeRunNode = BaseNode.extend({
   isHorizontalSanTee: z.boolean().default(false),
   isMainVentStack: z.boolean().default(false),
   showFramingPenetrations: z.boolean().default(true),
+  /** Optional revision token bumped when adjacent walls/framing change to invalidate cached 3D bore collars. */
+  framingRevision: z.number().int().min(0).optional(),
 })
 
 export type PlumbingPipeRunNode = z.infer<typeof PlumbingPipeRunNode>
@@ -112,8 +115,9 @@ export function buildPlumbingPipeRunGeometry(
   let penetrations: ReturnType<typeof computePipeFramingPenetrations> = []
   if (node.showFramingPenetrations && ctx && typeof ctx === 'object' && 'nodes' in ctx && ctx.nodes) {
     const record = ctx.nodes as unknown as Readonly<Record<string, SceneNodeLike>>
-    const walls = extractWallSegments(record, node.parentId ?? null)
-    const bones = extractBonesPlumbingContext(record, node.parentId ?? null)
+    const levelId = resolveNodeLevelId(record, node as unknown as SceneNodeLike) ?? node.parentId ?? null
+    const walls = extractWallSegments(record, levelId)
+    const bones = extractBonesPlumbingContext(record, levelId)
     penetrations = computePipeFramingPenetrations({
       pipeRunId: node.id,
       path: node.path,
@@ -206,7 +210,16 @@ export const plumbingPipeRunRenderDefinition: NodeDefinition<typeof PlumbingPipe
   },
   geometry: buildPlumbingPipeRunGeometry,
   geometryKey: (n) =>
-    JSON.stringify([n.path, n.system, n.material, n.nominalSize, n.hasCleanout, n.showFramingPenetrations]),
+    JSON.stringify([
+      n.path,
+      n.system,
+      n.material,
+      n.nominalSize,
+      n.hasCleanout,
+      n.showFramingPenetrations,
+      n.wallId ?? null,
+      n.framingRevision ?? 0,
+    ]),
   ports: getPlumbingPipeRunPorts,
   floorplan: buildPlumbingPipeRunFloorplan,
   presentation: {

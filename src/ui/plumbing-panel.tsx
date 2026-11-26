@@ -9,10 +9,15 @@ import { useMemo, useState } from 'react'
 import { plumbingAgentOperations } from '../agent-operations'
 import { auditScenePlumbing } from '../ipc/audit'
 import type { BonesIngestionMode } from '../ipc/autopopulate'
-import { type SceneNodeLike, extractBonesPlumbingContext } from '../ipc/framing-interop'
+import {
+  type SceneNodeLike,
+  belongsToLevel,
+  extractBonesPlumbingContext,
+} from '../ipc/framing-interop'
 import { buildPlumbingSchedule } from '../ipc/schedule'
 import {
   type EquipmentKind,
+  FIXTURE_SPECS,
   type FixtureKind,
   PLUMBING_SYSTEM_COLORS,
   type PlumbingSystem,
@@ -99,7 +104,10 @@ export default function PlumbingHostPanel() {
 
   const record = nodes as unknown as Readonly<Record<string, SceneNodeLike>>
   const levelId = activeLevelOf(nodes, selectedLevelId)
-  const audit = useMemo(() => auditScenePlumbing(record, { codeEdition }), [record, codeEdition])
+  const audit = useMemo(
+    () => auditScenePlumbing(record, { codeEdition, occupancy }),
+    [record, codeEdition, occupancy],
+  )
   const schedule = useMemo(() => buildPlumbingSchedule(record, { codeEdition, occupancy }), [record, codeEdition, occupancy])
   const bones = useMemo(() => extractBonesPlumbingContext(record, levelId), [record, levelId])
 
@@ -142,20 +150,20 @@ export default function PlumbingHostPanel() {
 
   const clearPlumbing = () => {
     const ids = Object.values(record)
-      .filter((n) => n.type.startsWith('plumbing:'))
+      .filter((n) => n.type.startsWith('plumbing:') && belongsToLevel(record, n, levelId))
       .map((n) => n.id)
     if (ids.length === 0) return
     runAsSingleSceneHistoryStep(useScene, () => {
       deleteNodes(ids as never)
     })
-    setStatusMsg(`Cleared ${ids.length} plumbing node(s).`)
+    setStatusMsg(`Cleared ${ids.length} plumbing node(s) on active level.`)
   }
 
   const toggleSystem = (sys: PlumbingSystem) => {
     const willHide = !hiddenSystems[sys]
     toggleSystemVisibility(sys)
     const updates = Object.values(record)
-      .filter((n) => n.type === 'plumbing:pipe-run' && n.system === sys)
+      .filter((n) => n.type === 'plumbing:pipe-run' && n.system === sys && belongsToLevel(record, n, levelId))
       .map((n) => ({ id: n.id, data: { visible: !willHide } }))
     if (updates.length > 0) {
       updateNodes(updates as never)
@@ -184,9 +192,10 @@ export default function PlumbingHostPanel() {
       setStatusMsg('Create a building level first before placing fixtures.')
       return
     }
+    const roughInY = FIXTURE_SPECS[selectedFix]?.roughInHeightM ?? 0.5
     const outcome = plumbingAgentOperations.plumbing_place_fixture(
       nodes,
-      { levelId, fixtureKind: selectedFix, position: [1.2, 0.5, 1.2], codeEdition },
+      { levelId, fixtureKind: selectedFix, position: [1.2, roughInY, 1.2], codeEdition },
       { activeLevelId: levelId },
     )
     const created = outcome.changes?.create?.[0]

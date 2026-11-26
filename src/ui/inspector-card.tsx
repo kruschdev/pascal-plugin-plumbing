@@ -14,6 +14,7 @@ import {
   type Vec3,
   computePipeFramingPenetrations,
   extractBonesPlumbingContext,
+  resolveNodeLevelId,
 } from '../ipc/framing-interop'
 import { extractWallSegments, measureDrainPathSlope, polylineLengthM } from '../ipc/routing'
 import { METERS_TO_FEET, type PipeMaterial, type PipeNominalSize, round2 } from '../ipc/tables'
@@ -23,14 +24,38 @@ import { usePlumbingUi } from './store'
 export default function PlumbingInspectorCard({ node }: { node?: AnyNode }) {
   const nodes = useScene((s) => s.nodes) as unknown as Readonly<Record<string, SceneNodeLike>>
   const codeEdition = usePlumbingUi((s) => s.codeEdition)
+  const occupancy = usePlumbingUi((s) => s.occupancy)
   const setActiveTab = usePlumbingUi((s) => s.setActiveTab)
+  const setSelectedManifoldId = usePlumbingUi((s) => s.setSelectedManifoldId)
 
-  const audit = useMemo(() => auditScenePlumbing(nodes, { codeEdition }), [nodes, codeEdition])
+  const audit = useMemo(
+    () => auditScenePlumbing(nodes, { codeEdition, occupancy }),
+    [nodes, codeEdition, occupancy],
+  )
   const raw = node as unknown as SceneNodeLike | undefined
   const nodeFindings = useMemo(
     () => (raw ? audit.findings.filter((f) => f.nodeIds.includes(raw.id)) : []),
     [audit, raw],
   )
+
+  const pipeMetrics = useMemo(() => {
+    if (!raw || raw.type !== 'plumbing:pipe-run' || !Array.isArray(raw.path)) return null
+    const path = raw.path as ReadonlyArray<Vec3>
+    const lengthFt = round2(polylineLengthM(path) * METERS_TO_FEET)
+    const slope = raw.system === 'dwv-drain' ? measureDrainPathSlope(path) : null
+    const lvlId = resolveNodeLevelId(nodes, raw)
+    const walls = extractWallSegments(nodes, lvlId)
+    const bones = extractBonesPlumbingContext(nodes, lvlId)
+    const pens = computePipeFramingPenetrations({
+      pipeRunId: raw.id,
+      path,
+      pipeSize: (raw.nominalSize as PipeNominalSize) || '1/2"',
+      material: (raw.material as PipeMaterial) || 'pex-a',
+      walls,
+      bonesContext: bones,
+    })
+    return { lengthFt, slope, pens }
+  }, [nodes, raw])
 
   if (!raw) return null
 
@@ -82,34 +107,25 @@ export default function PlumbingInspectorCard({ node }: { node?: AnyNode }) {
         </button>
       </div>
 
-      {raw.type === 'plumbing:pipe-run' && Array.isArray(raw.path) && (() => {
-        const path = raw.path as ReadonlyArray<Vec3>
-        const lengthFt = round2(polylineLengthM(path) * METERS_TO_FEET)
-        const slope = raw.system === 'dwv-drain' ? measureDrainPathSlope(path) : null
-        const walls = extractWallSegments(nodes, raw.parentId ?? null)
-        const bones = extractBonesPlumbingContext(nodes, raw.parentId ?? null)
-        const pens = computePipeFramingPenetrations({
-          pipeRunId: raw.id,
-          path,
-          pipeSize: (raw.nominalSize as PipeNominalSize) || '1/2"',
-          material: (raw.material as PipeMaterial) || 'pex-a',
-          walls,
-          bonesContext: bones,
-        })
-        return (
-          <>
-            <Row label="System / Size" value={`${String(raw.system)} · ${String(raw.nominalSize)} ${String(raw.material)}`} />
-            <Row label="Run Length" value={`${lengthFt} ft`} />
-            {slope && <Row label="Measured DWV Slope" value={`${slope.overallSlopeInPerFt}"/ft`} warn={slope.hasUphillSegment} />}
-            <Row label="Framing Penetrations" value={`${pens.length} stud/plate bore(s)`} />
-            {pens.length > 0 && (
-              <button type="button" onClick={() => openTab('penetrations')} style={linkBtnStyle}>
-                View Drill Schedule & Hole-Saw Sizes
-              </button>
-            )}
-          </>
-        )
-      })()}
+      {pipeMetrics && (
+        <>
+          <Row label="System / Size" value={`${String(raw.system)} · ${String(raw.nominalSize)} ${String(raw.material)}`} />
+          <Row label="Run Length" value={`${pipeMetrics.lengthFt} ft`} />
+          {pipeMetrics.slope && (
+            <Row
+              label="Measured DWV Slope"
+              value={`${pipeMetrics.slope.overallSlopeInPerFt}"/ft`}
+              warn={pipeMetrics.slope.hasUphillSegment}
+            />
+          )}
+          <Row label="Framing Penetrations" value={`${pipeMetrics.pens.length} stud/plate bore(s)`} />
+          {pipeMetrics.pens.length > 0 && (
+            <button type="button" onClick={() => openTab('penetrations')} style={linkBtnStyle}>
+              View Drill Schedule &amp; Hole-Saw Sizes
+            </button>
+          )}
+        </>
+      )}
 
       {raw.type === 'plumbing:fixture' && (
         <>
@@ -121,8 +137,15 @@ export default function PlumbingInspectorCard({ node }: { node?: AnyNode }) {
       {raw.type === 'plumbing:manifold' && (
         <>
           <Row label="Manifold" value={`${String(raw.manifoldKind)} (${String(raw.portCount ?? 12)} ports)`} />
-          <button type="button" onClick={() => openTab('manifold')} style={linkBtnStyle}>
-            Open 3D Manifold & Wet-Wall Cutaway
+          <button
+            type="button"
+            onClick={() => {
+              setSelectedManifoldId(raw.id)
+              openTab('manifold')
+            }}
+            style={linkBtnStyle}
+          >
+            Open 3D Manifold &amp; Wet-Wall Cutaway
           </button>
         </>
       )}

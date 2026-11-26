@@ -10,6 +10,17 @@ export default function PlumbingChatCard({ toolName, output, state, actions }: C
   const findings = Array.isArray(data?.findings)
     ? (data.findings as Array<{ id: string; title: string; codeRef: string; nodeIds?: string[] }>)
     : []
+  const scheduleObj = data?.schedule as
+    | {
+        fixtures?: unknown[]
+        loads?: { totalDfu?: number; peakDemandGpm?: number; recommendedBuildingDrain?: string }
+      }
+    | undefined
+  const bomObj = data?.bom as { grandTotalUsd?: number; totalLaborHours?: number } | undefined
+  const penetrations = Array.isArray(data?.penetrations) ? data.penetrations : null
+  const routedNodeId = typeof data?.nodeId === 'string' ? data.nodeId : null
+  const lengthFt = typeof data?.lengthFt === 'number' ? data.lengthFt : null
+  const slopeInPerFt = typeof data?.slopeInPerFt === 'number' ? data.slopeInPerFt : null
 
   return (
     <div
@@ -28,6 +39,51 @@ export default function PlumbingChatCard({ toolName, output, state, actions }: C
         <span style={{ fontSize: 11, opacity: 0.75 }}>{state}</span>
       </div>
       {output?.text && <div style={{ opacity: 0.85 }}>{output.text}</div>}
+
+      {/* Summary for plumbing_generate_schedule */}
+      {(scheduleObj || bomObj) && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 3, fontSize: 11 }}>
+          {scheduleObj?.loads && (
+            <div>
+              <strong>Schedule:</strong> {scheduleObj.fixtures?.length ?? 0} fixtures · {scheduleObj.loads.totalDfu ?? 0} DFU ·{' '}
+              {scheduleObj.loads.peakDemandGpm ?? 0} GPM · Drain {scheduleObj.loads.recommendedBuildingDrain ?? '-'}
+            </div>
+          )}
+          {bomObj && typeof bomObj.grandTotalUsd === 'number' && (
+            <div>
+              <strong>Estimated BOM:</strong> ${bomObj.grandTotalUsd.toLocaleString(undefined, { minimumFractionDigits: 2 })} (
+              {bomObj.totalLaborHours ?? 0} labor hrs)
+            </div>
+          )}
+          {penetrations && (
+            <div>
+              <strong>Framing Drill List:</strong> {penetrations.length} stud/plate penetration(s)
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Summary for plumbing_route_pipe */}
+      {lengthFt !== null && (
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 11 }}>
+          <span>
+            <strong>Routed Pipe:</strong> {lengthFt} ft
+            {slopeInPerFt !== null && slopeInPerFt > 0 ? ` · ${slopeInPerFt}"/ft slope` : ''}
+            {penetrations ? ` · ${penetrations.length} bore(s)` : ''}
+          </span>
+          {routedNodeId && (
+            <button
+              type="button"
+              onClick={() => actions.select([routedNodeId])}
+              style={{ background: 'transparent', border: 'none', color: '#38bdf8', cursor: 'pointer', fontSize: 11 }}
+            >
+              Select
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Summary for plumbing_audit_ipc */}
       {findings.slice(0, 4).map((f) => (
         <div key={f.id} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11 }}>
           <span>

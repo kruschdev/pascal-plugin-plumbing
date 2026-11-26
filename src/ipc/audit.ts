@@ -5,13 +5,22 @@
  * Framework-free: zero React, Three.js, or `@pascal-app/*` imports.
  */
 
-import { type SceneNodeLike, checkWetWallPipeFit } from './framing-interop'
 import {
+  type BonesPlumbingContext,
+  type SceneNodeLike,
+  checkWetWallPipeFit,
+  extractBonesPlumbingContext,
+  resolveNodeLevelId,
+} from './framing-interop'
+import {
+  type PlumbingObstacle,
+  type WallSegment2D,
   countPathElbows,
   detectPlumbingClashes,
   extractPlumbingObstacles,
   extractWallSegments,
   measureDrainPathSlope,
+  polylineHorizontalLengthM,
   polylineLengthM,
 } from './routing'
 import { buildElectricalCoordination } from './schedule'
@@ -28,6 +37,7 @@ import {
   FIXTURE_SPECS,
   type FixtureKind,
   METERS_TO_FEET,
+  type OccupancyType,
   type PipeMaterial,
   type PipeNominalSize,
   type PlumbingSystem,
@@ -60,15 +70,25 @@ const auditCache = new WeakMap<Readonly<Record<string, SceneNodeLike>>, Map<stri
 
 export function auditScenePlumbing(
   nodes: Readonly<Record<string, SceneNodeLike>>,
-  options: { codeEdition?: CodeEdition } = {},
+  options: { codeEdition?: CodeEdition; occupancy?: OccupancyType } = {},
 ): PlumbingAuditResult {
   const codeEdition = options.codeEdition ?? 'IPC-2021'
+  const all = Object.values(nodes)
+  const fixtures = all.filter((n) => n.type === 'plumbing:fixture')
+  const inferredCommercial = fixtures.some((f) => {
+    const k = f.fixtureKind as FixtureKind | undefined
+    return k ? Boolean(FIXTURE_SPECS[k]?.commercialOnly) : false
+  })
+  const occupancy: OccupancyType = options.occupancy ?? (inferredCommercial ? 'commercial' : 'residential')
+  const flushType = occupancy === 'commercial' ? 'flushometer' : 'flush-tank'
+  const cacheKey = `${codeEdition}|${occupancy}`
+
   let byEdition = auditCache.get(nodes)
   if (!byEdition) {
     byEdition = new Map()
     auditCache.set(nodes, byEdition)
   }
-  const cached = byEdition.get(codeEdition)
+  const cached = byEdition.get(cacheKey)
   if (cached) return cached
 
   const findings: PlumbingAuditFinding[] = []
@@ -77,14 +97,42 @@ export function auditScenePlumbing(
     findings.push({ id: `ipc_finding_${seq++}`, ...f })
   }
 
-  const all = Object.values(nodes)
-  const fixtures = all.filter((n) => n.type === 'plumbing:fixture')
   const equipment = all.filter((n) => n.type === 'plumbing:equipment')
   const pipeRuns = all.filter((n) => n.type === 'plumbing:pipe-run')
   const hasElectricalPanel = all.some((n) => n.type === 'electrical:panel')
-  const walls = extractWallSegments(nodes, null)
-  const wallById = new Map(walls.map((w) => [w.id, w]))
-  const obstacles = extractPlumbingObstacles(nodes, null)
+
+  // Per-level spatial context caches so multi-story scenes never mix level-local coordinates across floors
+  const wallMapByLevel = new Map<string, Map<string, WallSegment2D>>()
+  const bonesByLevel = new Map<string, BonesPlumbingContext>()
+  const obstaclesByLevel = new Map<string, PlumbingObstacle[]>()
+
+  const getWallMapForLevel = (lvlId: string | null): Map<string, WallSegment2D> => {
+    const key = lvlId ?? '__all__'
+    let m = wallMapByLevel.get(key)
+    if (!m) {
+      m = new Map(extractWallSegments(nodes, lvlId).map((w) => [w.id, w]))
+      wallMapByLevel.set(key, m)
+    }
+    return m
+  }
+  const getBonesForLevel = (lvlId: string | null): BonesPlumbingContext => {
+    const key = lvlId ?? '__all__'
+    let ctx = bonesByLevel.get(key)
+    if (!ctx) {
+      ctx = extractBonesPlumbingContext(nodes, lvlId)
+      bonesByLevel.set(key, ctx)
+    }
+    return ctx
+  }
+  const getObstaclesForLevel = (lvlId: string | null): PlumbingObstacle[] => {
+    const key = lvlId ?? '__all__'
+    let obs = obstaclesByLevel.get(key)
+    if (!obs) {
+      obs = extractPlumbingObstacles(nodes, lvlId)
+      obstaclesByLevel.set(key, obs)
+    }
+    return obs
+  }
 
   // 1. Fixture-level checks
   const hasExpansionTank = equipment.some((e) => e.equipmentKind === 'expansion-tank')
@@ -164,9 +212,25 @@ export function auditScenePlumbing(
   }
 
   // 3. Pipe-run checks (DWV slope, sanitary tee, trap arm, vent flood rim, wet-wall 2x6, velocity, gas, dryer vent, clashes)
-  let hasAnyCleanout = false
-  let hasMainVentStack = false
-  let hasAnyDwvDrain = false
+  const ventedFixtureIds = new Set<string>()
+  for (const r of pipeRuns) {
+    if (r.system === 'dwv-vent' && typeof r.sourceNodeId === 'string') {
+      ventedFixtureIds.add(r.sourceNodeId)
+    }
+  }
+
+  const dwvStateByLevel = new Map<
+    string,
+    { hasAnyDwvDrain: boolean; hasAnyCleanout: boolean; hasMainVentStack: boolean; sampleDrainIds: string[] }
+  >()
+  const getLevelDwvState = (lvlKey: string) => {
+    let st = dwvStateByLevel.get(lvlKey)
+    if (!st) {
+      st = { hasAnyDwvDrain: false, hasAnyCleanout: false, hasMainVentStack: false, sampleDrainIds: [] }
+      dwvStateByLevel.set(lvlKey, st)
+    }
+    return st
+  }
 
   for (const run of pipeRuns) {
     const system = (run.system as PlumbingSystem) || 'cold-water'
@@ -177,13 +241,16 @@ export function auditScenePlumbing(
       : []
     const lengthFt = polylineLengthM(path) * METERS_TO_FEET
     const pipeRadiusM = getPipeOuterDiameterM(size, material) / 2
+    const runLevelId = resolveNodeLevelId(nodes, run)
+    const runLevelKey = runLevelId ?? '__root__'
+    const lvlState = getLevelDwvState(runLevelKey)
 
-    if (run.hasCleanout === true) hasAnyCleanout = true
-    if (run.isMainVentStack === true) hasMainVentStack = true
+    if (run.hasCleanout === true) lvlState.hasAnyCleanout = true
+    if (run.isMainVentStack === true) lvlState.hasMainVentStack = true
 
-    // Structural & NEC 110.26(E) obstacle clashes
+    // Structural & NEC 110.26(E) obstacle clashes (strictly same-level!)
     if (path.length >= 2) {
-      const clashes = detectPlumbingClashes(path, obstacles, pipeRadiusM)
+      const clashes = detectPlumbingClashes(path, getObstaclesForLevel(runLevelId), pipeRadiusM)
       for (const obs of clashes) {
         if (obs.category === 'electrical-dedicated-space') {
           push({
@@ -207,13 +274,17 @@ export function auditScenePlumbing(
       }
     }
 
-    // Wet-wall cavity check (2x4 vs 2x6 for >= 3" DWV)
-    if (typeof run.wallId === 'string' && wallById.has(run.wallId)) {
-      const wall = wallById.get(run.wallId)!
+    // Wet-wall cavity check (2x4 vs 2x6 for >= 3" DWV, honoring Bones/Structural load-bearing overrides)
+    const levelWallMap = getWallMapForLevel(runLevelId)
+    if (typeof run.wallId === 'string' && levelWallMap.has(run.wallId)) {
+      const wall = levelWallMap.get(run.wallId)!
+      const bonesCtx = getBonesForLevel(runLevelId)
+      const wallRule = bonesCtx.wallRules.get(wall.id)
       const fit = checkWetWallPipeFit({
         wallThicknessM: wall.thicknessM,
         pipeSize: size,
         material,
+        isLoadBearing: wallRule?.isLoadBearing ?? false,
       })
       if (!fit.fits) {
         push({
@@ -229,7 +300,8 @@ export function auditScenePlumbing(
 
     // DWV Drain checks
     if (system === 'dwv-drain') {
-      hasAnyDwvDrain = true
+      lvlState.hasAnyDwvDrain = true
+      if (lvlState.sampleDrainIds.length < 1) lvlState.sampleDrainIds.push(run.id)
       const minSlope = getMinRequiredDrainSlopeInPerFt(size)
       if (path.length >= 2) {
         const slopeInfo = measureDrainPathSlope(path)
@@ -265,8 +337,20 @@ export function auditScenePlumbing(
         })
       }
 
-      if (typeof run.trapArmLengthFt === 'number' && run.trapArmLengthFt > 0) {
-        const trapCheck = checkTrapArmDistance(size, run.trapArmLengthFt)
+      let effectiveTrapArmFt: number | null =
+        typeof run.trapArmLengthFt === 'number' && run.trapArmLengthFt > 0 ? run.trapArmLengthFt : null
+      if (effectiveTrapArmFt === null && typeof run.sourceNodeId === 'string' && path.length >= 2) {
+        const src = nodes[run.sourceNodeId]
+        if (src && src.type === 'plumbing:fixture' && !ventedFixtureIds.has(src.id)) {
+          const srcKind = (src.fixtureKind as FixtureKind) || 'lavatory'
+          if (FIXTURE_SPECS[srcKind]?.needsPTrap) {
+            const horizFt = round2(polylineHorizontalLengthM(path) * METERS_TO_FEET)
+            if (horizFt > 0.25) effectiveTrapArmFt = horizFt
+          }
+        }
+      }
+      if (effectiveTrapArmFt !== null) {
+        const trapCheck = checkTrapArmDistance(size, effectiveTrapArmFt)
         if (!trapCheck.ok) {
           push({
             severity: 'error',
@@ -328,7 +412,7 @@ export function auditScenePlumbing(
     ) {
       const wsfu = typeof run.wsfuLoad === 'number' ? run.wsfuLoad : 0
       if (wsfu > 0) {
-        const gpm = wsfuToGpm(wsfu, 'flush-tank')
+        const gpm = wsfuToGpm(wsfu, flushType)
         const hyd = calculateSupplyHydraulics({
           gpm,
           size,
@@ -419,26 +503,29 @@ export function auditScenePlumbing(
     }
   }
 
-  // Whole-scene DWV invariants
-  if (hasAnyDwvDrain && !hasAnyCleanout) {
-    push({
-      severity: 'error',
-      codeRef: 'IPC 708.1',
-      title: 'DWV system missing accessible cleanout',
-      detail: 'Drainage network has no stack-base or building-drain cleanout marked.',
-      suggestedFix: 'Add a cleanout at the base of the main soil stack and at the building drain exit.',
-      nodeIds: pipeRuns.filter((r) => r.system === 'dwv-drain').slice(0, 1).map((r) => r.id),
-    })
-  }
-  if (hasAnyDwvDrain && !hasMainVentStack) {
-    push({
-      severity: 'warning',
-      codeRef: 'IPC 903.1',
-      title: 'DWV system missing 3" main vent stack through roof',
-      detail: 'Every building with plumbing drainage requires at least one main vent stack extending outdoors.',
-      suggestedFix: 'Add a 3" main soil/vent stack terminating outdoors through the roof.',
-      nodeIds: [],
-    })
+  // Per-level DWV invariants (each level with drainage requires accessible cleanout & vent stack coverage)
+  for (const [lvlKey, st] of dwvStateByLevel.entries()) {
+    const lvlSuffix = lvlKey !== '__root__' && dwvStateByLevel.size > 1 ? ` (level ${lvlKey})` : ''
+    if (st.hasAnyDwvDrain && !st.hasAnyCleanout) {
+      push({
+        severity: 'error',
+        codeRef: 'IPC 708.1',
+        title: `DWV system missing accessible cleanout${lvlSuffix}`,
+        detail: `Drainage network${lvlSuffix} has no stack-base or building-drain cleanout marked.`,
+        suggestedFix: 'Add a cleanout at the base of the main soil stack and at the building drain exit.',
+        nodeIds: st.sampleDrainIds,
+      })
+    }
+    if (st.hasAnyDwvDrain && !st.hasMainVentStack) {
+      push({
+        severity: 'warning',
+        codeRef: 'IPC 903.1',
+        title: `DWV system missing 3" main vent stack through roof${lvlSuffix}`,
+        detail: `Every building level with plumbing drainage${lvlSuffix} requires vent stack connection extending outdoors.`,
+        suggestedFix: 'Add a 3" main soil/vent stack terminating outdoors through the roof.',
+        nodeIds: st.sampleDrainIds,
+      })
+    }
   }
 
   // 4. Cross-Trade Electrical Coordination Checks (when an electrical panel exists in scene)
@@ -465,6 +552,6 @@ export function auditScenePlumbing(
     infoCount: findings.filter((f) => f.severity === 'info').length,
     findings,
   }
-  byEdition.set(codeEdition, result)
+  byEdition.set(cacheKey, result)
   return result
 }

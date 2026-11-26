@@ -52,6 +52,7 @@ import {
   type PlumbingSystem,
   type SupplyTopology,
   getFixtureDfu,
+  getFixtureWsfu,
   round2,
 } from './tables'
 
@@ -142,6 +143,7 @@ export type PlannedPipeRunSpec = {
   hasShutoffWithin6Ft: boolean
   isHorizontalSanTee: boolean
   isMainVentStack: boolean
+  trapArmLengthFt?: number
   wallId?: string
 }
 
@@ -362,8 +364,11 @@ export function planPlumbingAutoPopulate(
           ]
         : []
 
+  const flushType: 'flush-tank' | 'flushometer' = occupancy === 'commercial' ? 'flushometer' : 'flush-tank'
+
   for (const pf of placedFixtures) {
     const spec = FIXTURE_SPECS[pf.kind]
+    const wsfu = getFixtureWsfu(pf.kind, occupancy)
     fixtures.push({
       id: nextFixId(),
       name: `${pf.roomName} ${spec.label}`,
@@ -373,9 +378,9 @@ export function planPlumbingAutoPopulate(
       roomName: pf.roomName,
       wallId: pf.wallId,
       dfu: getFixtureDfu(pf.kind, codeEdition),
-      wsfuCold: spec.wsfuCold,
-      wsfuHot: spec.wsfuHot,
-      wsfuTotal: spec.wsfuTotal,
+      wsfuCold: wsfu.cold,
+      wsfuHot: wsfu.hot,
+      wsfuTotal: wsfu.total,
       trapSize: spec.minTrapIn,
       drainSize: spec.minDrainIn,
       ventSize: spec.minVentIn,
@@ -386,115 +391,119 @@ export function planPlumbingAutoPopulate(
     })
   }
 
-  for (const room of targetWetRooms) {
-    if (populatedRoomNames.has(room.name) && bonesMode !== 'auto') continue
-    const existingInRoom = fixtures.filter((f) => f.roomName === room.name).map((f) => f.fixtureKind)
-    const defaults = defaultFixturesForRoom(room)
-    const missing = defaults.filter((k) => {
-      const idx = existingInRoom.indexOf(k)
-      if (idx >= 0) {
-        existingInRoom.splice(idx, 1)
-        return false
-      }
-      return true
-    })
-    if (missing.length === 0) continue
-
-    const nearWall = nearestWallToPoint(room.centroid[0], room.centroid[1], walls)
-    const rot = nearWall ? yawFacingRoom(nearWall.wall, room.centroid) : 0
-    const count = missing.length
-
-    for (let i = 0; i < count; i++) {
-      const kind = missing[i]!
-      const spec = FIXTURE_SPECS[kind]
-      let px = room.centroid[0]
-      let pz = room.centroid[1]
-      if (nearWall) {
-        const wall = nearWall.wall
-        const span = Math.min(wall.lengthM * 0.72, Math.max(0.8, count * 0.65))
-        const frac = count === 1 ? 0.5 : i / (count - 1)
-        const offsetAlong = (frac - 0.5) * span
-        const baseT = Math.max(0.15, Math.min(0.85, nearWall.t))
-        const wx = wall.start[0] + wall.ux * (wall.lengthM * baseT + offsetAlong)
-        const wz = wall.start[1] + wall.uz * (wall.lengthM * baseT + offsetAlong)
-        // Offset slightly into the room from wall centerline
-        const toCx = room.centroid[0] - wx
-        const toCz = room.centroid[1] - wz
-        const dot = toCx * wall.nx + toCz * wall.nz
-        const sign = dot >= 0 ? 1 : -1
-        const inward = wall.thicknessM / 2 + Math.min(0.28, spec.dimensionsM[2] / 2)
-        px = wx + wall.nx * sign * inward
-        pz = wz + wall.nz * sign * inward
-      } else {
-        px = room.centroid[0] + (i - (count - 1) / 2) * 0.75
-      }
-      fixtures.push({
-        id: nextFixId(),
-        name: `${room.name} ${spec.label}`,
-        fixtureKind: kind,
-        position: [round2(px), spec.roughInHeightM, round2(pz)],
-        rotation: rot,
-        roomName: room.name,
-        wallId: nearWall?.wall.id,
-        dfu: getFixtureDfu(kind, codeEdition),
-        wsfuCold: spec.wsfuCold,
-        wsfuHot: spec.wsfuHot,
-        wsfuTotal: spec.wsfuTotal,
-        trapSize: spec.minTrapIn,
-        drainSize: spec.minDrainIn,
-        ventSize: spec.minVentIn,
-        supplySize: spec.supplySizeIn,
-        hasVacuumBreaker: kind === 'hose-bibb',
-        hasPTrap: spec.needsPTrap,
-        electricalDemand: getFixtureElectricalDemand(kind),
+  if (bonesMode !== 'import-only') {
+    for (const room of targetWetRooms) {
+      if (populatedRoomNames.has(room.name) && bonesMode !== 'auto') continue
+      const existingInRoom = fixtures.filter((f) => f.roomName === room.name).map((f) => f.fixtureKind)
+      const defaults = defaultFixturesForRoom(room)
+      const missing = defaults.filter((k) => {
+        const idx = existingInRoom.indexOf(k)
+        if (idx >= 0) {
+          existingInRoom.splice(idx, 1)
+          return false
+        }
+        return true
       })
-    }
-  }
+      if (missing.length === 0) continue
 
-  // 3. Minimum 2 Frost-Proof Exterior Hose Bibbs (Front & Rear per IPC / best practice)
-  const hoseBibbSpec = FIXTURE_SPECS['hose-bibb']
-  const frontBibbPos: Vec3 = [round2(bounds.cx), hoseBibbSpec.roughInHeightM, round2(bounds.maxZ + 0.08)]
-  const rearBibbPos: Vec3 = [round2(bounds.cx), hoseBibbSpec.roughInHeightM, round2(bounds.minZ - 0.08)]
-  fixtures.push(
-    {
-      id: nextFixId(),
-      name: 'Exterior Front Hose Bibb (Frost-Proof)',
-      fixtureKind: 'hose-bibb',
-      position: frontBibbPos,
-      rotation: 0,
-      roomName: 'Exterior Front',
-      dfu: 0,
-      wsfuCold: hoseBibbSpec.wsfuCold,
-      wsfuHot: 0,
-      wsfuTotal: hoseBibbSpec.wsfuTotal,
-      trapSize: null,
-      drainSize: null,
-      ventSize: null,
-      supplySize: '1/2"',
-      hasVacuumBreaker: true,
-      hasPTrap: false,
-      electricalDemand: null,
-    },
-    {
-      id: nextFixId(),
-      name: 'Exterior Rear Hose Bibb (Frost-Proof)',
-      fixtureKind: 'hose-bibb',
-      position: rearBibbPos,
-      rotation: Math.PI,
-      roomName: 'Exterior Rear',
-      dfu: 0,
-      wsfuCold: hoseBibbSpec.wsfuCold,
-      wsfuHot: 0,
-      wsfuTotal: hoseBibbSpec.wsfuTotal,
-      trapSize: null,
-      drainSize: null,
-      ventSize: null,
-      supplySize: '1/2"',
-      hasVacuumBreaker: true,
-      hasPTrap: false,
-      electricalDemand: null,
-    },
-  )
+      const nearWall = nearestWallToPoint(room.centroid[0], room.centroid[1], walls)
+      const rot = nearWall ? yawFacingRoom(nearWall.wall, room.centroid) : 0
+      const count = missing.length
+
+      for (let i = 0; i < count; i++) {
+        const kind = missing[i]!
+        const spec = FIXTURE_SPECS[kind]
+        const wsfu = getFixtureWsfu(kind, occupancy)
+        let px = room.centroid[0]
+        let pz = room.centroid[1]
+        if (nearWall) {
+          const wall = nearWall.wall
+          const span = Math.min(wall.lengthM * 0.72, Math.max(0.8, count * 0.65))
+          const frac = count === 1 ? 0.5 : i / (count - 1)
+          const offsetAlong = (frac - 0.5) * span
+          const baseT = Math.max(0.15, Math.min(0.85, nearWall.t))
+          const wx = wall.start[0] + wall.ux * (wall.lengthM * baseT + offsetAlong)
+          const wz = wall.start[1] + wall.uz * (wall.lengthM * baseT + offsetAlong)
+          // Offset slightly into the room from wall centerline
+          const toCx = room.centroid[0] - wx
+          const toCz = room.centroid[1] - wz
+          const dot = toCx * wall.nx + toCz * wall.nz
+          const sign = dot >= 0 ? 1 : -1
+          const inward = wall.thicknessM / 2 + Math.min(0.28, spec.dimensionsM[2] / 2)
+          px = wx + wall.nx * sign * inward
+          pz = wz + wall.nz * sign * inward
+        } else {
+          px = room.centroid[0] + (i - (count - 1) / 2) * 0.75
+        }
+        fixtures.push({
+          id: nextFixId(),
+          name: `${room.name} ${spec.label}`,
+          fixtureKind: kind,
+          position: [round2(px), spec.roughInHeightM, round2(pz)],
+          rotation: rot,
+          roomName: room.name,
+          wallId: nearWall?.wall.id,
+          dfu: getFixtureDfu(kind, codeEdition),
+          wsfuCold: wsfu.cold,
+          wsfuHot: wsfu.hot,
+          wsfuTotal: wsfu.total,
+          trapSize: spec.minTrapIn,
+          drainSize: spec.minDrainIn,
+          ventSize: spec.minVentIn,
+          supplySize: spec.supplySizeIn,
+          hasVacuumBreaker: kind === 'hose-bibb',
+          hasPTrap: spec.needsPTrap,
+          electricalDemand: getFixtureElectricalDemand(kind),
+        })
+      }
+    }
+
+    // 3. Minimum 2 Frost-Proof Exterior Hose Bibbs (Front & Rear per IPC / best practice)
+    const hoseBibbSpec = FIXTURE_SPECS['hose-bibb']
+    const hoseWsfu = getFixtureWsfu('hose-bibb', occupancy)
+    const frontBibbPos: Vec3 = [round2(bounds.cx), hoseBibbSpec.roughInHeightM, round2(bounds.maxZ + 0.08)]
+    const rearBibbPos: Vec3 = [round2(bounds.cx), hoseBibbSpec.roughInHeightM, round2(bounds.minZ - 0.08)]
+    fixtures.push(
+      {
+        id: nextFixId(),
+        name: 'Exterior Front Hose Bibb (Frost-Proof)',
+        fixtureKind: 'hose-bibb',
+        position: frontBibbPos,
+        rotation: 0,
+        roomName: 'Exterior Front',
+        dfu: 0,
+        wsfuCold: hoseWsfu.cold,
+        wsfuHot: 0,
+        wsfuTotal: hoseWsfu.total,
+        trapSize: null,
+        drainSize: null,
+        ventSize: null,
+        supplySize: '1/2"',
+        hasVacuumBreaker: true,
+        hasPTrap: false,
+        electricalDemand: null,
+      },
+      {
+        id: nextFixId(),
+        name: 'Exterior Rear Hose Bibb (Frost-Proof)',
+        fixtureKind: 'hose-bibb',
+        position: rearBibbPos,
+        rotation: Math.PI,
+        roomName: 'Exterior Rear',
+        dfu: 0,
+        wsfuCold: hoseWsfu.cold,
+        wsfuHot: 0,
+        wsfuTotal: hoseWsfu.total,
+        trapSize: null,
+        drainSize: null,
+        ventSize: null,
+        supplySize: '1/2"',
+        hasVacuumBreaker: true,
+        hasPTrap: false,
+        electricalDemand: null,
+      },
+    )
+  }
 
   // 4. Place Mechanical Core: Water Entry (PRV + Shutoff), Water Heater, Expansion Tank, PEX Manifold, optional Gas Meter
   const mechRoom =
@@ -618,6 +627,7 @@ export function planPlumbingAutoPopulate(
     material: supplyMaterial,
     isHot: false,
     minSize: '3/4"',
+    flushType,
   })
   const mainColdRoute = routePressurizedPipeRun({
     from: waterEntryPos,
@@ -646,14 +656,16 @@ export function planPlumbingAutoPopulate(
     isMainVentStack: false,
   })
 
+  const totalHotWsfu = round2(fixtures.reduce((s, f) => s + f.wsfuHot, 0))
+  const hotMainSized = sizeSupplyPipe({
+    wsfu: Math.max(1, totalHotWsfu),
+    material: supplyMaterial,
+    isHot: true,
+    minSize: '3/4"',
+    flushType,
+  })
+
   if (manifoldId) {
-    const totalHotWsfu = round2(fixtures.reduce((s, f) => s + f.wsfuHot, 0))
-    const hotHeaderSized = sizeSupplyPipe({
-      wsfu: Math.max(1, totalHotWsfu),
-      material: supplyMaterial,
-      isHot: true,
-      minSize: '3/4"',
-    })
     const whToManifoldHot = routePressurizedPipeRun({
       from: [whPos[0] + 0.1, 1.55, whPos[2]],
       to: [manifoldPos[0] - 0.12, manifoldPos[1], manifoldPos[2]],
@@ -663,10 +675,10 @@ export function planPlumbingAutoPopulate(
     })
     pipeRuns.push({
       id: nextPipeId(),
-      name: `${hotHeaderSized.size} Hot Header (WH -> PEX Manifold)`,
+      name: `${hotMainSized.size} Hot Header (WH -> PEX Manifold)`,
       system: 'hot-water',
       material: supplyMaterial,
-      nominalSize: hotHeaderSized.size,
+      nominalSize: hotMainSized.size,
       path: whToManifoldHot.path,
       slopeInPerFt: 0,
       dfuLoad: 0,
@@ -680,6 +692,107 @@ export function planPlumbingAutoPopulate(
       isHorizontalSanTee: false,
       isMainVentStack: false,
     })
+  }
+
+  // Trunk-and-branch spine routing: build a sized 3/4"/1" main Cold Trunk and Hot Trunk along the wet-room corridor,
+  // then tap short 1/2" branches from the nearest trunk point to each fixture!
+  let coldTrunkId: string | undefined
+  let hotTrunkId: string | undefined
+  let coldTrunkSpine: Vec3[] = []
+  let hotTrunkSpine: Vec3[] = []
+
+  const nearestPointOnSpine = (spine: ReadonlyArray<Vec3>, x: number, z: number, fallbackY: number): Vec3 => {
+    let bestPt: Vec3 = spine[0] ?? [x, fallbackY, z]
+    let bestDist = Infinity
+    for (let i = 1; i < spine.length; i++) {
+      const a = spine[i - 1]!
+      const b = spine[i]!
+      const dx = b[0] - a[0]
+      const dz = b[2] - a[2]
+      const lenSq = dx * dx + dz * dz
+      if (lenSq < 1e-4) continue
+      const t = Math.max(0, Math.min(1, ((x - a[0]) * dx + (z - a[2]) * dz) / lenSq))
+      const px = a[0] + dx * t
+      const py = a[1] + (b[1] - a[1]) * t
+      const pz = a[2] + dz * t
+      const d = Math.hypot(x - px, z - pz)
+      if (d < bestDist) {
+        bestDist = d
+        bestPt = [round2(px), round2(py), round2(pz)]
+      }
+    }
+    return bestPt
+  }
+
+  if (supplyTopology === 'trunk-and-branch' && fixtures.length > 0) {
+    const supplyFixtures = fixtures.filter((f) => f.supplySize !== null)
+    if (supplyFixtures.length > 0) {
+      const furthestFix = supplyFixtures.reduce((far, f) => {
+        const dFar = Math.hypot(far.position[0] - whPos[0], far.position[2] - whPos[2])
+        const dCur = Math.hypot(f.position[0] - whPos[0], f.position[2] - whPos[2])
+        return dCur > dFar ? f : far
+      }, supplyFixtures[0]!)
+      const spineEndX = round2(furthestFix.position[0])
+      const spineEndZ = round2(furthestFix.position[2])
+
+      const coldTrunkRoute = routePressurizedPipeRun({
+        from: [whPos[0] + 0.08, 1.45, whPos[2]],
+        to: [spineEndX, supplyPlaneY, spineEndZ],
+        routingPlaneY: supplyPlaneY,
+        euclideanInCavity: false,
+        obstacles,
+      })
+      coldTrunkId = nextPipeId()
+      coldTrunkSpine = coldTrunkRoute.path
+      pipeRuns.push({
+        id: coldTrunkId,
+        name: `${mainColdSized.size} Main Cold Distribution Trunk`,
+        system: 'cold-water',
+        material: supplyMaterial,
+        nominalSize: mainColdSized.size,
+        path: coldTrunkRoute.path,
+        slopeInPerFt: 0,
+        dfuLoad: 0,
+        wsfuLoad: round2(totalWsfu),
+        gasBtuh: 0,
+        sourceNodeId: whId,
+        hasCleanout: false,
+        hasSedimentTrap: false,
+        hasShutoffWithin6Ft: true,
+        isHorizontalSanTee: false,
+        isMainVentStack: false,
+      })
+
+      if (totalHotWsfu > 0) {
+        const hotTrunkRoute = routePressurizedPipeRun({
+          from: [whPos[0] - 0.08, 1.45, whPos[2]],
+          to: [spineEndX, supplyPlaneY + 0.04, spineEndZ],
+          routingPlaneY: supplyPlaneY + 0.04,
+          euclideanInCavity: false,
+          obstacles,
+        })
+        hotTrunkId = nextPipeId()
+        hotTrunkSpine = hotTrunkRoute.path
+        pipeRuns.push({
+          id: hotTrunkId,
+          name: `${hotMainSized.size} Main Hot Distribution Trunk`,
+          system: 'hot-water',
+          material: supplyMaterial,
+          nominalSize: hotMainSized.size,
+          path: hotTrunkRoute.path,
+          slopeInPerFt: 0,
+          dfuLoad: 0,
+          wsfuLoad: totalHotWsfu,
+          gasBtuh: 0,
+          sourceNodeId: whId,
+          hasCleanout: false,
+          hasSedimentTrap: false,
+          hasShutoffWithin6Ft: true,
+          isHorizontalSanTee: false,
+          isMainVentStack: false,
+        })
+      }
+    }
   }
 
   // 6. Place Main 3"/4" Vent Stack near Wet-Fixture Centroid & Route Gravity DWV + Re-Vents + Supply
@@ -784,6 +897,7 @@ export function planPlumbingAutoPopulate(
         slopeInPerFt: 0.25,
         obstacles,
       })
+      const trapArmFt = fix.ventSize ? 1.5 : dwvRoute.lengthFt
       pipeRuns.push({
         id: nextPipeId(),
         name: `${branchSizing.recommendedSize} DWV Drain (${fix.name})`,
@@ -802,6 +916,7 @@ export function planPlumbingAutoPopulate(
         hasShutoffWithin6Ft: false,
         isHorizontalSanTee: false,
         isMainVentStack: false,
+        trapArmLengthFt: trapArmFt,
         wallId: fix.wallId,
       })
 
@@ -836,16 +951,21 @@ export function planPlumbingAutoPopulate(
       }
     }
 
-    // Cold Water Supply (velocity-checked)
+    // Cold Water Supply (velocity-checked; taps nearest trunk spine point in trunk-and-branch mode)
     if (fix.supplySize && fix.wsfuCold > 0) {
       const coldSized = sizeSupplyPipe({
         wsfu: fix.wsfuCold,
         material: supplyMaterial,
         isHot: false,
         minSize: fix.supplySize,
+        flushType,
       })
+      const coldOrigin: Vec3 =
+        supplyTopology === 'trunk-and-branch' && coldTrunkSpine.length >= 2
+          ? nearestPointOnSpine(coldTrunkSpine, fix.position[0] + 0.06, fix.position[2], supplyPlaneY)
+          : [supplySourcePos[0] + 0.08, supplySourcePos[1], supplySourcePos[2]]
       const coldRoute = routePressurizedPipeRun({
-        from: [supplySourcePos[0] + 0.08, supplySourcePos[1], supplySourcePos[2]],
+        from: coldOrigin,
         to: [fix.position[0] + 0.06, fix.position[1], fix.position[2]],
         routingPlaneY: supplyPlaneY,
         euclideanInCavity: supplyTopology === 'manifold',
@@ -853,7 +973,7 @@ export function planPlumbingAutoPopulate(
       })
       pipeRuns.push({
         id: nextPipeId(),
-        name: `${coldSized.size} Cold Supply (${fix.name})`,
+        name: `${coldSized.size} Cold ${supplyTopology === 'trunk-and-branch' ? 'Branch' : 'Supply'} (${fix.name})`,
         system: 'cold-water',
         material: supplyMaterial,
         nominalSize: coldSized.size,
@@ -862,7 +982,7 @@ export function planPlumbingAutoPopulate(
         dfuLoad: 0,
         wsfuLoad: fix.wsfuCold,
         gasBtuh: 0,
-        sourceNodeId: supplySourceId,
+        sourceNodeId: coldTrunkId ?? supplySourceId,
         targetNodeId: fix.id,
         hasCleanout: false,
         hasSedimentTrap: false,
@@ -872,28 +992,34 @@ export function planPlumbingAutoPopulate(
       })
     }
 
-    // Hot Water Supply (velocity-checked)
+    // Hot Water Supply (velocity-checked; taps nearest trunk spine point in trunk-and-branch mode)
     if (fix.supplySize && fix.wsfuHot > 0) {
       const hotSized = sizeSupplyPipe({
         wsfu: fix.wsfuHot,
         material: supplyMaterial,
         isHot: true,
         minSize: fix.supplySize,
+        flushType,
       })
+      const hotOrigin: Vec3 =
+        supplyTopology === 'trunk-and-branch' && hotTrunkSpine.length >= 2
+          ? nearestPointOnSpine(hotTrunkSpine, fix.position[0] - 0.06, fix.position[2], supplyPlaneY + 0.04)
+          : [supplySourcePos[0] - 0.08, supplySourcePos[1], supplySourcePos[2]]
       const hotRoute = routePressurizedPipeRun({
-        from: [supplySourcePos[0] - 0.08, supplySourcePos[1], supplySourcePos[2]],
+        from: hotOrigin,
         to: [fix.position[0] - 0.06, fix.position[1], fix.position[2]],
         routingPlaneY: supplyPlaneY + 0.04,
         euclideanInCavity: supplyTopology === 'manifold',
         obstacles,
       })
-      if (hotRoute.lengthFt > maxHotDist) {
-        maxHotDist = hotRoute.lengthFt
+      const distFromWh = Math.hypot(fix.position[0] - whPos[0], fix.position[2] - whPos[2])
+      if (distFromWh > maxHotDist) {
+        maxHotDist = distFromWh
         furthestHotFixture = fix
       }
       pipeRuns.push({
         id: nextPipeId(),
-        name: `${hotSized.size} Hot Supply (${fix.name})`,
+        name: `${hotSized.size} Hot ${supplyTopology === 'trunk-and-branch' ? 'Branch' : 'Supply'} (${fix.name})`,
         system: 'hot-water',
         material: supplyMaterial,
         nominalSize: hotSized.size,
@@ -902,7 +1028,7 @@ export function planPlumbingAutoPopulate(
         dfuLoad: 0,
         wsfuLoad: fix.wsfuHot,
         gasBtuh: 0,
-        sourceNodeId: supplySourceId,
+        sourceNodeId: hotTrunkId ?? supplySourceId,
         targetNodeId: fix.id,
         hasCleanout: false,
         hasSedimentTrap: false,
@@ -965,7 +1091,7 @@ export function planPlumbingAutoPopulate(
       position: gasMeterPos,
       rotation: 0,
       roomName: 'Exterior',
-      gasBtuh: totalGasBtuh,
+      gasBtuh: 0, // Supply meter, not an appliance load (prevents double-counting appliance BTU/hr)
       electricalDemand: null,
     })
     const gasRoute = routePressurizedPipeRun({

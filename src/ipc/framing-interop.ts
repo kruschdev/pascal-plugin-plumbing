@@ -57,6 +57,20 @@ export type ElectricalPowerDemand = {
   label: string
 }
 
+const NEC_STANDARD_BREAKERS = [15, 20, 25, 30, 35, 40, 45, 50, 60, 70, 80, 90, 100, 125, 150, 175, 200] as const
+
+/**
+ * Compute minimum NEC 240.6(A) standard breaker rating for a continuous 240V water-heating load
+ * per NEC 422.11(E) / 422.13 (125% of nameplate current).
+ */
+export function standardNec240BreakerAmps(watts: number, voltage = 240): number {
+  const minAmps = (Math.max(100, watts) / voltage) * 1.25
+  for (const std of NEC_STANDARD_BREAKERS) {
+    if (std >= minAmps) return std
+  }
+  return 200
+}
+
 /**
  * Default NEC-compliant electrical power demands for powered plumbing equipment.
  */
@@ -67,7 +81,7 @@ export function getEquipmentElectricalDemand(
   switch (kind) {
     case 'water-heater-tank-electric': {
       const watts = customWatts && customWatts > 0 ? customWatts : 4500
-      const amps = watts > 4800 ? 40 : 30
+      const amps = Math.max(30, standardNec240BreakerAmps(watts, 240))
       return {
         required: true,
         voltage: 240,
@@ -84,11 +98,12 @@ export function getEquipmentElectricalDemand(
     }
     case 'water-heater-hpwh': {
       const watts = customWatts && customWatts > 0 ? customWatts : 4500
+      const amps = Math.max(30, standardNec240BreakerAmps(watts, 240))
       return {
         required: true,
         voltage: 240,
         poles: 2,
-        breakerAmps: 30,
+        breakerAmps: amps,
         loadVa: watts,
         continuous: true,
         dedicatedCircuit: true,
@@ -228,11 +243,11 @@ export function getFixtureElectricalDemand(kind: FixtureKind): ElectricalPowerDe
         breakerAmps: 15,
         loadVa: 1200,
         continuous: false,
-        dedicatedCircuit: false,
+        dedicatedCircuit: true, // NEC 210.23(B)(2): 1200 VA > 50% of 15A branch rating
         gfciRequired: true,
         afciRequired: false,
         loadCategory: 'appliance',
-        label: 'Heated Bidet Seat (GFCI)',
+        label: 'Heated Bidet Seat (Dedicated GFCI)',
       }
     default:
       return null
@@ -243,8 +258,10 @@ export type BonesWallConstruction = 'framed' | 'lgs' | 'cmu' | 'skip'
 
 export type BonesWallRule = {
   construction: BonesWallConstruction
-  spacingIn: 16 | 24
+  spacingIn: 12 | 16 | 24
   studThicknessM: number
+  isLoadBearing?: boolean
+  isWetWall?: boolean
 }
 
 export type BonesPlumbingServiceType = 'water-heater' | 'water-entry' | 'sewer-exit'
@@ -260,8 +277,11 @@ export type BonesPlumbingServiceAnchor = {
 
 export type BonesPlumbingContext = {
   framingPresent: boolean
-  defaultSpacingIn: 16 | 24
+  /** Authoritative source of framing rules (`structural` takes Priority #1 over `bones`). */
+  source?: 'structural' | 'bones' | 'default'
+  defaultSpacingIn: 12 | 16 | 24
   framingSystem: 'lumber' | 'lgs'
+  floorSystem?: 'dimensional' | 'tji-ijoist' | 'open-web-truss'
   wallRules: ReadonlyMap<string, BonesWallRule>
   waterHeaterAnchor: BonesPlumbingServiceAnchor | null
   waterEntryAnchor: BonesPlumbingServiceAnchor | null
@@ -292,21 +312,73 @@ export function belongsToLevel(
   return false
 }
 
+export function resolveNodeLevelId(
+  nodes: Readonly<Record<string, SceneNodeLike>>,
+  node: SceneNodeLike,
+): string | null {
+  if (node.type === 'level') return node.id
+  let cur: SceneNodeLike | undefined = node
+  let guard = 0
+  while (cur?.parentId && guard < 12) {
+    const parent: SceneNodeLike | undefined = nodes[cur.parentId]
+    if (!parent) return cur.parentId
+    if (parent.type === 'level') return parent.id
+    cur = parent
+    guard += 1
+  }
+  return null
+}
+
+const bonesContextCache = new WeakMap<
+  Readonly<Record<string, SceneNodeLike>>,
+  Map<string, BonesPlumbingContext>
+>()
+
 /**
  * Extract `@pascal-app/plugin-bones` framing rules and authoritative `bones:service` plumbing anchors
- * (`water-heater`, `water-entry`, `sewer-exit`) for a level.
+ * (`water-heater`, `water-entry`, `sewer-exit`) for a level. WeakMap-memoized per scene nodes object.
  */
 export function extractBonesPlumbingContext(
   nodes: Readonly<Record<string, SceneNodeLike>>,
   levelId: string | null = null,
 ): BonesPlumbingContext {
+  const key = levelId ?? '__all__'
+  let byLevel = bonesContextCache.get(nodes)
+  if (!byLevel) {
+    byLevel = new Map()
+    bonesContextCache.set(nodes, byLevel)
+  }
+  const cached = byLevel.get(key)
+  if (cached) return cached
+
   const all = Object.values(nodes)
-  const framingNode = all.find(
+  // Priority #1: Dedicated `@kruschdev/pascal-plugin-structural` (`structural:assembly`) takes precedence over `bones:framing`.
+  const structuralNode = all.find(
+    (n) => n.type === 'structural:assembly' && belongsToLevel(nodes, n, levelId),
+  )
+  const bonesNode = all.find(
     (n) => n.type === 'bones:framing' && belongsToLevel(nodes, n, levelId),
   )
+  const framingNode = structuralNode ?? bonesNode
+  const source: 'structural' | 'bones' | 'default' = structuralNode
+    ? 'structural'
+    : bonesNode
+      ? 'bones'
+      : 'default'
 
-  const defaultSpacingIn: 16 | 24 = framingNode?.studSpacingIn === 24 ? 24 : 16
+  const defaultSpacingIn: 12 | 16 | 24 =
+    framingNode?.studSpacingIn === 12
+      ? 12
+      : framingNode?.studSpacingIn === 24
+        ? 24
+        : 16
   const framingSystem: 'lumber' | 'lgs' = framingNode?.framingSystem === 'lgs' ? 'lgs' : 'lumber'
+  const floorSystem =
+    structuralNode?.floorSystem === 'tji-ijoist' ||
+    structuralNode?.floorSystem === 'open-web-truss' ||
+    structuralNode?.floorSystem === 'dimensional'
+      ? structuralNode.floorSystem
+      : undefined
   const wallRules = new Map<string, BonesWallRule>()
 
   const rawOverrides = framingNode?.wallOverrides
@@ -318,11 +390,15 @@ export function extractBonesPlumbingContext(
         r.construction === 'lgs' || r.construction === 'cmu' || r.construction === 'skip'
           ? r.construction
           : 'framed'
-      const spacingIn: 16 | 24 = r.studSpacingIn === 24 ? 24 : defaultSpacingIn
+      const rawSpacing = r.studSpacingIn ?? r.spacingIn
+      const spacingIn: 12 | 16 | 24 =
+        rawSpacing === 12 ? 12 : rawSpacing === 24 ? 24 : defaultSpacingIn
       wallRules.set(wallId, {
         construction,
         spacingIn,
         studThicknessM: DRESSED_STUD_THICKNESS_M,
+        isLoadBearing: Boolean(r.isLoadBearing),
+        isWetWall: Boolean(r.isWetWall),
       })
     }
   }
@@ -351,22 +427,27 @@ export function extractBonesPlumbingContext(
     if (st === 'sewer-exit' && !sewerExitAnchor) sewerExitAnchor = anchor
   }
 
-  return {
+  const ctx: BonesPlumbingContext = {
     framingPresent: Boolean(framingNode),
+    source,
     defaultSpacingIn,
     framingSystem,
+    floorSystem,
     wallRules,
     waterHeaterAnchor,
     waterEntryAnchor,
     sewerExitAnchor,
     hasPlumbingSchematic: Boolean(waterHeaterAnchor || waterEntryAnchor || sewerExitAnchor),
   }
+  byLevel.set(key, ctx)
+  return ctx
 }
 
 /**
  * IRC R602.6 / IPC wet-wall cavity check:
  * - A 3" or 4" PVC/ABS DWV pipe (3.5" / 4.5" OD + hub) cannot fit inside a 2x4 stud wall (3.5" cavity).
- * - Boring through load-bearing studs is limited to 40% of stud depth (60% non-load-bearing).
+ * - Boring through load-bearing studs is limited to 40% of stud depth (60% non-load-bearing), measured on drilled hole diameter.
+ * - Steel nail shield plates are required when the edge of the bored hole is < 1-1/4" (1.25") from the stud face (IRC R602.6 / IPC 305.6).
  */
 export function checkWetWallPipeFit(params: {
   wallThicknessM: number
@@ -392,11 +473,12 @@ export function checkWetWallPipeFit(params: {
   // Approximate stud cavity depth = wallThickness - 1" total drywall (0.0254 m)
   const cavityDepthM = Math.max(0.0889, wallThicknessM - 0.0254)
   const pipeOdM = getPipeOuterDiameterM(pipeSize, material)
+  const boreM = recommendHoleSawIn(pipeSize, material) * INCHES_TO_METERS
   const hubAllowanceM = material === 'pvc-dwv' || material === 'abs-dwv' || material === 'cast-iron' ? 0.014 : 0
   const requiredCavityM = pipeOdM + hubAllowanceM
-  const borePct = Math.round((pipeOdM / cavityDepthM) * 100)
+  const borePct = Math.round(((isHorizontalBore ? boreM : pipeOdM) / cavityDepthM) * 100)
   const maxBorePct = isLoadBearing ? 40 : 60
-  const needsNailPlate = (cavityDepthM - pipeOdM) / 2 < 1.5 * INCHES_TO_METERS
+  const needsNailPlate = (cavityDepthM - boreM) / 2 < 1.25 * INCHES_TO_METERS
 
   if (requiredCavityM > cavityDepthM + 0.002) {
     return {
@@ -416,7 +498,7 @@ export function checkWetWallPipeFit(params: {
       needsNailPlate,
       borePctOfStud: borePct,
       codeRef: 'IRC R602.6',
-      reason: `Horizontal bore (${borePct}% of stud depth) exceeds ${maxBorePct}% ${isLoadBearing ? 'load-bearing' : 'non-load-bearing'} limit.`,
+      reason: `Horizontal bore (${(boreM / INCHES_TO_METERS).toFixed(2)}" hole = ${borePct}% of stud depth) exceeds ${maxBorePct}% ${isLoadBearing ? 'load-bearing' : 'non-load-bearing'} limit.`,
     }
   }
 
@@ -467,6 +549,10 @@ export type FramingPenetration = {
   position: Vec3
   /** Direction vector along the pipe at penetration (unit vector). */
   pipeDirection: Vec3
+  /** Unit normal `[nx, nz]` perpendicular to the penetrated wall plane for nail-plate orientation. */
+  wallNormal: readonly [number, number]
+  /** Nominal stud cavity depth (m) for accurate front/back nail-plate surface offset. */
+  studDepthM: number
   pipeSize: PipeNominalSize
   material: PipeMaterial
   /** Recommended drill bit / hole-saw diameter in inches (OD + 1/4" clearance, rounded to 1/8"). */
@@ -565,12 +651,18 @@ export function computePipeFramingPenetrations(params: {
             const pu = (px - wall.start[0]) * wall.ux + (pz - wall.start[1]) * wall.uz
             const pn = Math.abs((px - wall.start[0]) * wall.nx + (pz - wall.start[1]) * wall.nz)
             if (pu >= 0 && pu <= wall.lengthM && pn <= halfThick) {
+              const studDepthM = Math.max(0.0889, wall.thicknessM - 0.0254)
               const fit = checkWetWallPipeFit({
                 wallThicknessM: wall.thicknessM,
                 pipeSize,
                 material,
+                isLoadBearing: rule?.isLoadBearing ?? false,
                 isHorizontalBore: false,
               })
+              const firestopNote =
+                bonesContext?.source === 'structural'
+                  ? 'IRC R302.11(5) firestop collar / intumescent caulk required at plate penetration.'
+                  : undefined
               penetrations.push({
                 id: `${pipeRunId}_pen_${seq++}`,
                 pipeRunId,
@@ -579,14 +671,16 @@ export function computePipeFramingPenetrations(params: {
                 memberLabel: plate.label,
                 position: [px, plate.y, pz],
                 pipeDirection: dir,
+                wallNormal: [wall.nx, wall.nz],
+                studDepthM,
                 pipeSize,
                 material,
                 holeSawIn,
                 borePctOfStud: fit.borePctOfStud,
                 needsNailPlate: fit.needsNailPlate,
                 codeCompliant: fit.fits,
-                codeRef: fit.codeRef,
-                note: fit.reason,
+                codeRef: bonesContext?.source === 'structural' ? 'IRC R602.6 / R302.11(5)' : fit.codeRef,
+                note: [fit.reason, firestopNote].filter(Boolean).join(' ') || undefined,
               })
             }
           }
@@ -609,10 +703,12 @@ export function computePipeFramingPenetrations(params: {
           const pn = Math.abs((px - wall.start[0]) * wall.nx + (pz - wall.start[1]) * wall.nz)
           if (pn > halfThick) continue
 
+          const studDepthM = Math.max(0.0889, wall.thicknessM - 0.0254)
           const fit = checkWetWallPipeFit({
             wallThicknessM: wall.thicknessM,
             pipeSize,
             material,
+            isLoadBearing: rule?.isLoadBearing ?? false,
             isHorizontalBore: true,
           })
           penetrations.push({
@@ -623,6 +719,8 @@ export function computePipeFramingPenetrations(params: {
             memberLabel: `Stud #${studIdx} @ ${Math.round(studU / INCHES_TO_METERS)}" OC`,
             position: [px, py, pz],
             pipeDirection: dir,
+            wallNormal: [wall.nx, wall.nz],
+            studDepthM,
             pipeSize,
             material,
             holeSawIn,

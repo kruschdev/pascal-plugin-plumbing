@@ -8,6 +8,7 @@ import {
   type SceneNodeLike,
   getEquipmentElectricalDemand,
   getFixtureElectricalDemand,
+  resolveNodeLevelId,
 } from './framing-interop'
 import { polylineLengthM } from './routing'
 import {
@@ -29,6 +30,7 @@ import {
   type PipeNominalSize,
   type PlumbingSystem,
   getFixtureDfu,
+  getFixtureWsfu,
   round2,
 } from './tables'
 
@@ -99,7 +101,23 @@ export type PlumbingSchedule = {
   loads: PlumbingLoadSummary
 }
 
+const PASSIVE_EQUIPMENT_KINDS = new Set<string>([
+  'water-heater-tank-gas',
+  'expansion-tank',
+  'gas-meter',
+  'main-shutoff-prv',
+  'backwater-valve',
+])
+
 function readElectricalDemandFromNode(n: SceneNodeLike): ElectricalPowerDemand | null {
+  // Passive / non-electric equipment kinds never require electrical power even if stale metadata remains after an Inspector kind switch
+  if (
+    n.type === 'plumbing:equipment' &&
+    typeof n.equipmentKind === 'string' &&
+    PASSIVE_EQUIPMENT_KINDS.has(n.equipmentKind)
+  ) {
+    return null
+  }
   const raw = n.electricalDemand as Partial<ElectricalPowerDemand> | undefined
   if (raw && typeof raw === 'object' && raw.required === true) {
     return {
@@ -129,7 +147,7 @@ function readElectricalDemandFromNode(n: SceneNodeLike): ElectricalPowerDemand |
 }
 
 /**
- * Match powered plumbing equipment/fixtures against nearby `electrical:device` nodes in the scene
+ * Match powered plumbing equipment/fixtures against same-level `electrical:device` nodes in the scene
  * so users see live `WIRED` vs `UNWIRED` coordination with `@kruschdev/pascal-plugin-electrical`.
  */
 export function buildElectricalCoordination(
@@ -137,6 +155,16 @@ export function buildElectricalCoordination(
 ): ElectricalCoordinationRow[] {
   const all = Object.values(nodes)
   const elecDevices = all.filter((n) => n.type === 'electrical:device')
+
+  // Count how many devices share each (panelId, circuitNumber) so dedicated plumbing loads do not match shared countertop circuits
+  const circuitDeviceCounts = new Map<string, number>()
+  for (const d of elecDevices) {
+    if (typeof d.circuitNumber === 'number' && d.circuitNumber > 0) {
+      const key = `${String(d.panelId ?? '')}:${d.circuitNumber}`
+      circuitDeviceCounts.set(key, (circuitDeviceCounts.get(key) ?? 0) + 1)
+    }
+  }
+
   const rows: ElectricalCoordinationRow[] = []
 
   for (const n of all) {
@@ -144,24 +172,38 @@ export function buildElectricalCoordination(
     const demand = readElectricalDemandFromNode(n)
     if (!demand || !demand.required) continue
 
+    const nodeLevelId = resolveNodeLevelId(nodes, n)
     const pos = Array.isArray(n.position) && n.position.length >= 3 ? n.position : null
     let matchedDevice: SceneNodeLike | undefined
     for (const d of elecDevices) {
-      // Explicit source link (direct or inside metadata) OR close proximity (< 1.5 m) with matching voltage/poles
+      // Explicit source link (direct or inside metadata) always wins
       const meta = d.metadata as { mepSourceNodeId?: string } | undefined
       if (d.mepSourceNodeId === n.id || meta?.mepSourceNodeId === n.id) {
         matchedDevice = d
         break
       }
+      // Never match devices across different building levels!
+      if (resolveNodeLevelId(nodes, d) !== nodeLevelId) continue
+
       const dPos = Array.isArray(d.position) && d.position.length >= 3 ? d.position : null
       if (!pos || !dPos) continue
       const dist = Math.hypot(pos[0] - dPos[0], pos[2] - dPos[2])
       const dPoles = typeof d.poles === 'number' ? d.poles : 1
       const dAmps = typeof d.breakerAmps === 'number' ? d.breakerAmps : 15
-      if (dist <= 1.5 && dPoles >= demand.poles && dAmps >= demand.breakerAmps) {
-        matchedDevice = d
-        break
+      if (dist > 1.5 || dPoles < demand.poles || dAmps < demand.breakerAmps) continue
+
+      // When the plumbing load requires a dedicated circuit, require a dedicated/single-load circuit match
+      if (demand.dedicatedCircuit) {
+        const isDedicatedKind = d.deviceKind === 'dedicated-240v' || dPoles >= 2
+        const cktKey =
+          typeof d.circuitNumber === 'number' && d.circuitNumber > 0
+            ? `${String(d.panelId ?? '')}:${d.circuitNumber}`
+            : null
+        const isSingleLoadCircuit = cktKey !== null && (circuitDeviceCounts.get(cktKey) ?? 0) === 1
+        if (!isDedicatedKind && !isSingleLoadCircuit) continue
       }
+      matchedDevice = d
+      break
     }
 
     rows.push({
@@ -183,8 +225,14 @@ export function buildElectricalCoordination(
   return rows
 }
 
+const scheduleCache = new WeakMap<
+  Readonly<Record<string, SceneNodeLike>>,
+  Map<string, PlumbingSchedule>
+>()
+
 /**
  * Compile the full Fixture Schedule, Pipe System Summary, Load Summary, and Electrical Coordination Table.
+ * WeakMap-memoized per scene nodes object reference.
  */
 export function buildPlumbingSchedule(
   nodes: Readonly<Record<string, SceneNodeLike>>,
@@ -195,6 +243,15 @@ export function buildPlumbingSchedule(
   } = {},
 ): PlumbingSchedule {
   const { codeEdition = 'IPC-2021', occupancy = 'residential', supplyMaterial = 'pex-a' } = options
+  const cacheKey = `${codeEdition}|${occupancy}|${supplyMaterial}`
+  let byKey = scheduleCache.get(nodes)
+  if (!byKey) {
+    byKey = new Map()
+    scheduleCache.set(nodes, byKey)
+  }
+  const cached = byKey.get(cacheKey)
+  if (cached) return cached
+
   const all = Object.values(nodes)
 
   const fixtures: FixtureScheduleRow[] = []
@@ -210,10 +267,26 @@ export function buildPlumbingSchedule(
       ? n.fixtureKind
       : 'lavatory') as FixtureKind
     const spec = FIXTURE_SPECS[kind]
+    const ratedWsfu = getFixtureWsfu(kind, occupancy)
     const dfu = typeof n.dfu === 'number' ? n.dfu : getFixtureDfu(kind, codeEdition)
-    const wsfuCold = typeof n.wsfuCold === 'number' ? n.wsfuCold : spec.wsfuCold
-    const wsfuHot = typeof n.wsfuHot === 'number' ? n.wsfuHot : spec.wsfuHot
-    const wsfuTotal = typeof n.wsfuTotal === 'number' ? n.wsfuTotal : spec.wsfuTotal
+    const wsfuCold =
+      occupancy === 'commercial'
+        ? Math.max(ratedWsfu.cold, typeof n.wsfuCold === 'number' ? n.wsfuCold : 0)
+        : typeof n.wsfuCold === 'number'
+          ? n.wsfuCold
+          : ratedWsfu.cold
+    const wsfuHot =
+      occupancy === 'commercial'
+        ? Math.max(ratedWsfu.hot, typeof n.wsfuHot === 'number' ? n.wsfuHot : 0)
+        : typeof n.wsfuHot === 'number'
+          ? n.wsfuHot
+          : ratedWsfu.hot
+    const wsfuTotal =
+      occupancy === 'commercial'
+        ? Math.max(ratedWsfu.total, typeof n.wsfuTotal === 'number' ? n.wsfuTotal : 0)
+        : typeof n.wsfuTotal === 'number'
+          ? n.wsfuTotal
+          : ratedWsfu.total
 
     totalDfu += dfu
     totalWsfuCold += wsfuCold
@@ -244,7 +317,13 @@ export function buildPlumbingSchedule(
   let totalGasBtuh = 0
 
   for (const n of all) {
-    if (n.type === 'plumbing:equipment' && typeof n.gasBtuh === 'number' && n.gasBtuh > 0) {
+    // Exclude supply-source gas-meter from appliance demand summation so totalGasBtuh is never doubled
+    if (
+      n.type === 'plumbing:equipment' &&
+      n.equipmentKind !== 'gas-meter' &&
+      typeof n.gasBtuh === 'number' &&
+      n.gasBtuh > 0
+    ) {
       totalGasBtuh += n.gasBtuh
     }
     if (n.type !== 'plumbing:pipe-run') continue
@@ -319,7 +398,7 @@ export function buildPlumbingSchedule(
         })
       : null
 
-  return {
+  const result: PlumbingSchedule = {
     fixtures,
     pipeSummary: [...pipeMap.values()].sort((a, b) => a.system.localeCompare(b.system)),
     electricalCoordination: buildElectricalCoordination(nodes),
@@ -344,6 +423,8 @@ export function buildPlumbingSchedule(
       waterHeaterRecommendation: whRec,
     },
   }
+  byKey.set(cacheKey, result)
+  return result
 }
 
 function csvEscape(v: string | number): string {

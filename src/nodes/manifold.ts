@@ -36,11 +36,31 @@ export const PlumbingManifoldNode = BaseNode.extend({
 
 export type PlumbingManifoldNode = z.infer<typeof PlumbingManifoldNode>
 
+function rotateManifoldLocal2D(
+  cx: number,
+  cz: number,
+  lx: number,
+  lz: number,
+  rot: number,
+): [number, number] {
+  const cos = Math.cos(rot)
+  const sin = Math.sin(rot)
+  return [cx + lx * cos + lz * sin, cz - lx * sin + lz * cos]
+}
+
 export function getPlumbingManifoldPorts(node: PlumbingManifoldNode): NodePort[] {
   const [x, y, zPos] = node.position
+  const rot = node.rotation ?? 0
+  if (node.manifoldKind === 'gas-csst') {
+    return [
+      { id: 'gas-in', position: [x, y - 0.25, zPos], direction: [0, -1, 0], diameter: 0.75, system: 'gas' },
+    ]
+  }
+  const [hx, hz] = rotateManifoldLocal2D(x, zPos, -0.085, 0, rot)
+  const [cx, cz] = rotateManifoldLocal2D(x, zPos, 0.085, 0, rot)
   return [
-    { id: 'hot-in', position: [x - 0.085, y - 0.32, zPos], direction: [0, -1, 0], diameter: 0.75, system: 'water' },
-    { id: 'cold-in', position: [x + 0.085, y - 0.32, zPos], direction: [0, -1, 0], diameter: 0.75, system: 'water' },
+    { id: 'hot-in', position: [hx, y - 0.32, hz], direction: [0, -1, 0], diameter: 0.75, system: 'water' },
+    { id: 'cold-in', position: [cx, y - 0.32, cz], direction: [0, -1, 0], diameter: 0.75, system: 'water' },
   ]
 }
 
@@ -67,28 +87,41 @@ export function buildPlumbingManifoldFloorplan(
   const view = ctx.viewState
   const selected = (view?.selected || view?.highlighted) ?? false
   const [cx, , cz] = node.position
+  const rot = node.rotation ?? 0
   const hw = 0.22
   const hd = 0.08
   const baseStroke = node.manifoldKind === 'gas-csst' ? '#eab308' : '#0284c7'
   const stroke = selected && view?.palette ? view.palette.selectedStroke : baseStroke
 
+  const p0 = rotateManifoldLocal2D(cx, cz, -hw, -hd, rot)
+  const p1 = rotateManifoldLocal2D(cx, cz, hw, -hd, rot)
+  const p2 = rotateManifoldLocal2D(cx, cz, hw, hd, rot)
+  const p3 = rotateManifoldLocal2D(cx, cz, -hw, hd, rot)
+
   const children: FloorplanGeometry[] = [
     {
       kind: 'polygon',
-      points: [
-        [cx - hw, cz - hd],
-        [cx + hw, cz - hd],
-        [cx + hw, cz + hd],
-        [cx - hw, cz + hd],
-      ],
+      points: [p0, p1, p2, p3],
       fill: baseStroke,
       fillOpacity: 0.16,
       stroke,
       strokeWidth: 0.025,
     },
-    { kind: 'line', x1: cx - hw * 0.45, y1: cz - hd, x2: cx - hw * 0.45, y2: cz + hd, stroke: '#dc2626', strokeWidth: 0.025 },
-    { kind: 'line', x1: cx + hw * 0.45, y1: cz - hd, x2: cx + hw * 0.45, y2: cz + hd, stroke: '#2563eb', strokeWidth: 0.025 },
   ]
+  if (node.manifoldKind === 'gas-csst') {
+    const g0 = rotateManifoldLocal2D(cx, cz, -hw * 0.7, 0, rot)
+    const g1 = rotateManifoldLocal2D(cx, cz, hw * 0.7, 0, rot)
+    children.push({ kind: 'line', x1: g0[0], y1: g0[1], x2: g1[0], y2: g1[1], stroke: '#eab308', strokeWidth: 0.025 })
+  } else {
+    const h0 = rotateManifoldLocal2D(cx, cz, -hw * 0.45, -hd, rot)
+    const h1 = rotateManifoldLocal2D(cx, cz, -hw * 0.45, hd, rot)
+    const c0 = rotateManifoldLocal2D(cx, cz, hw * 0.45, -hd, rot)
+    const c1 = rotateManifoldLocal2D(cx, cz, hw * 0.45, hd, rot)
+    children.push(
+      { kind: 'line', x1: h0[0], y1: h0[1], x2: h1[0], y2: h1[1], stroke: '#dc2626', strokeWidth: 0.025 },
+      { kind: 'line', x1: c0[0], y1: c0[1], x2: c1[0], y2: c1[1], stroke: '#2563eb', strokeWidth: 0.025 },
+    )
+  }
   if (selected) {
     children.push({ kind: 'move-handle', point: [cx, cz] })
   }

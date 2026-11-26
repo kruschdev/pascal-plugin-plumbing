@@ -17,6 +17,7 @@ import {
   extractBonesPlumbingContext,
   getEquipmentElectricalDemand,
   getFixtureElectricalDemand,
+  resolveNodeLevelId,
 } from './ipc/framing-interop'
 import { buildPlumbingBom, formatPlumbingBomCsv } from './ipc/pricing'
 import {
@@ -63,11 +64,12 @@ function deterministicId(prefix: string, nodes: SceneNodes): string {
 }
 
 function collectAllScenePenetrations(nodes: Readonly<Record<string, SceneNodeLike>>): FramingPenetration[] {
-  const walls = extractWallSegments(nodes, null)
-  const bones = extractBonesPlumbingContext(nodes, null)
   const out: FramingPenetration[] = []
   for (const n of Object.values(nodes)) {
     if (n.type !== 'plumbing:pipe-run' || !Array.isArray(n.path)) continue
+    const lvlId = resolveNodeLevelId(nodes, n)
+    const walls = extractWallSegments(nodes, lvlId)
+    const bones = extractBonesPlumbingContext(nodes, lvlId)
     out.push(
       ...computePipeFramingPenetrations({
         pipeRunId: n.id,
@@ -103,6 +105,18 @@ export const plumbingAgentOperations = {
     const kind = input.equipmentKind ?? 'water-heater-tank-electric'
     const id = deterministicId('plumbeq', nodes)
     const electricalDemand = getEquipmentElectricalDemand(kind, input.watts)
+    const defaultCapGal =
+      kind === 'water-heater-tank-electric' || kind === 'water-heater-tank-gas' || kind === 'water-heater-hpwh'
+        ? 50
+        : kind === 'expansion-tank'
+          ? 2
+          : 0
+    const defaultGasBtuh =
+      kind === 'water-heater-tank-gas'
+        ? 40000
+        : kind === 'water-heater-tankless-gas'
+          ? 199000
+          : 0
     const node = {
       object: 'node',
       id,
@@ -115,8 +129,8 @@ export const plumbingAgentOperations = {
       rotation: input.rotation ?? 0,
       equipmentKind: kind,
       roomName: input.roomName ?? 'Utility',
-      capacityGal: input.capacityGal ?? 50,
-      gasBtuh: input.gasBtuh ?? 0,
+      capacityGal: input.capacityGal ?? defaultCapGal,
+      gasBtuh: input.gasBtuh ?? defaultGasBtuh,
       watts: input.watts ?? (electricalDemand?.loadVa ?? 0),
       hasDrainPan: true,
       hasTpDischarge: true,
@@ -196,6 +210,11 @@ export const plumbingAgentOperations = {
     const id = deterministicId('plumbfix', nodes)
     const electricalDemand = getFixtureElectricalDemand(kind)
     const dfu = getFixtureDfu(kind, input.codeEdition ?? 'IPC-2021')
+    const resolvedPos: [number, number, number] = [
+      input.position[0],
+      input.position[1] === 0 && spec.roughInHeightM > 0 ? spec.roughInHeightM : input.position[1],
+      input.position[2],
+    ]
     const node = {
       object: 'node',
       id,
@@ -204,7 +223,7 @@ export const plumbingAgentOperations = {
       parentId: levelId,
       visible: true,
       metadata: {},
-      position: input.position,
+      position: resolvedPos,
       rotation: input.rotation ?? 0,
       fixtureKind: kind,
       roomName: input.roomName ?? 'Bathroom',
@@ -249,15 +268,38 @@ export const plumbingAgentOperations = {
     if (!levelId) refuse('level_not_found', 'No level found in scene to route pipe.')
     const record = asRecord(nodes)
     const system = input.system ?? 'cold-water'
-    const material =
-      input.material ?? (system.startsWith('dwv') ? 'pvc-dwv' : system === 'fuel-gas' ? 'black-iron' : 'pex-a')
-    const nominalSize = input.nominalSize ?? (system === 'dwv-drain' ? '3"' : '1/2"')
+    const material: PipeMaterial =
+      input.material ??
+      (system.startsWith('dwv')
+        ? 'pvc-dwv'
+        : system === 'fuel-gas'
+          ? 'black-iron'
+          : system === 'dryer-vent'
+            ? 'rigid-aluminum'
+            : system === 'condensate'
+              ? 'pvc-dwv'
+              : 'pex-a')
+    const nominalSize: PipeNominalSize =
+      input.nominalSize ??
+      (system === 'dwv-drain'
+        ? '3"'
+        : system === 'dwv-vent'
+          ? '2"'
+          : system === 'dryer-vent'
+            ? '4"'
+            : system === 'fuel-gas'
+              ? '3/4"'
+              : system === 'condensate'
+                ? '3/4"'
+                : '1/2"')
     const obstacles = extractPlumbingObstacles(record, levelId)
     const levelH = resolveLevelHeightM(record, levelId)
 
     let path: Vec3[]
     let slopeInPerFt = 0
     let lengthFt = 0
+    let detoured = false
+    let clashes: ReturnType<typeof extractPlumbingObstacles> = []
 
     if (system === 'dwv-drain') {
       const r = routeDwvDrainRun({
@@ -270,6 +312,8 @@ export const plumbingAgentOperations = {
       path = r.path
       slopeInPerFt = r.slopeInPerFt
       lengthFt = r.lengthFt
+      detoured = r.detoured
+      clashes = r.clashes
     } else if (system === 'dwv-vent') {
       const r = routeVentRun({
         from: input.from,
@@ -280,6 +324,8 @@ export const plumbingAgentOperations = {
       })
       path = r.path
       lengthFt = r.lengthFt
+      detoured = r.detoured
+      clashes = r.clashes
     } else {
       const planeY = (input.foundationType ?? 'crawlspace') === 'slab' ? levelH - 0.25 : -0.16
       const r = routePressurizedPipeRun({
@@ -291,6 +337,8 @@ export const plumbingAgentOperations = {
       })
       path = r.path
       lengthFt = r.lengthFt
+      detoured = r.detoured
+      clashes = r.clashes
     }
 
     const id = deterministicId('plumbpipe', nodes)
@@ -330,7 +378,7 @@ export const plumbingAgentOperations = {
     } as unknown as AnyNode
 
     return {
-      result: { nodeId: id, lengthFt, slopeInPerFt, penetrations },
+      result: { nodeId: id, lengthFt, slopeInPerFt, detoured, clashes, penetrations },
       changes: { create: [{ node, parentId: levelId }] },
     }
   },
@@ -440,7 +488,10 @@ export const plumbingAgentOperations = {
       simulated[r.id] = node as unknown as SceneNodeLike
     }
 
-    const audit = auditScenePlumbing(simulated, { codeEdition: plan.codeEdition })
+    const audit = auditScenePlumbing(simulated, {
+      codeEdition: plan.codeEdition,
+      occupancy: input.occupancy,
+    })
     return {
       result: {
         levelId,
@@ -491,6 +542,7 @@ export const plumbingAgentOperations = {
       laborRateUsd: input.laborRateUsd ?? 115,
       materialMarkupPct: input.materialMarkupPct ?? 0,
       salesTaxPct: input.salesTaxPct ?? 0,
+      schedule,
     })
     const penetrations = collectAllScenePenetrations(record)
     return {

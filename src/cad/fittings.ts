@@ -141,6 +141,8 @@ export function buildPipeRunCad(params: {
   penetrations?: ReadonlyArray<{
     position: Vec3
     pipeDirection: Vec3
+    wallNormal?: readonly [number, number]
+    studDepthM?: number
     holeSawIn: number
     needsNailPlate: boolean
     codeCompliant: boolean
@@ -160,6 +162,12 @@ export function buildPipeRunCad(params: {
   const hubRadius = radius * 1.18
   const isRigid = material !== 'pex-a' && material !== 'pex-b' && material !== 'csst'
 
+  // Shared unit geometries reused across all segments, elbows, collars, and nail plates in this run
+  const unitSegGeo = new CylinderGeometry(radius, radius, 1, 12)
+  let jointGeo: SphereGeometry | null = null
+  let collarGeo: CylinderGeometry | null = null
+  let nailPlateGeo: BoxGeometry | null = null
+
   for (let i = 1; i < path.length; i++) {
     const a = new Vector3(path[i - 1]![0], path[i - 1]![1], path[i - 1]![2])
     const b = new Vector3(path[i]![0], path[i]![1], path[i]![2])
@@ -171,26 +179,29 @@ export function buildPipeRunCad(params: {
     const quat = new Quaternion().setFromUnitVectors(UP, dir)
     const mid = new Vector3().addVectors(a, b).multiplyScalar(0.5)
 
-    const seg = new Mesh(new CylinderGeometry(radius, radius, len, 12), mat)
+    const seg = new Mesh(unitSegGeo, mat)
     seg.position.copy(mid)
     seg.quaternion.copy(quat)
+    seg.scale.set(1, len, 1)
     seg.castShadow = true
     seg.receiveShadow = true
     g.add(seg)
 
     // Smooth elbow/wye joint sphere at vertices
     if (i < path.length - 1) {
-      const joint = new Mesh(new SphereGeometry(isRigid ? hubRadius : radius * 1.06, 12, 10), mat)
+      jointGeo ??= new SphereGeometry(isRigid ? hubRadius : radius * 1.06, 12, 10)
+      const joint = new Mesh(jointGeo, mat)
       joint.position.copy(b)
       g.add(joint)
     }
 
     // Coupling hubs every ~3.05 m (10 ft) on rigid pipe
     if (isRigid && len > 3.2) {
+      collarGeo ??= new CylinderGeometry(hubRadius, hubRadius, 0.055, 12)
       const hubs = Math.floor(len / 3.05)
       for (let h = 1; h <= hubs; h++) {
         const pt = a.clone().addScaledVector(dir, h * 3.05)
-        const collar = new Mesh(new CylinderGeometry(hubRadius, hubRadius, 0.055, 12), mat)
+        const collar = new Mesh(collarGeo, mat)
         collar.position.copy(pt)
         collar.quaternion.copy(quat)
         g.add(collar)
@@ -207,23 +218,42 @@ export function buildPipeRunCad(params: {
     g.add(plug)
   }
 
-  // Framing Penetration 3D Bore Sleeves & IRC R602.6 / IPC 305.6 Nail Plates
+  // Framing Penetration 3D Bore Sleeves & IRC R602.6 / IPC 305.6 Nail Plates (oriented to wall normal on both stud faces)
+  const sleeveGeoCache = new Map<string, CylinderGeometry>()
   for (const pen of penetrations) {
     const boreR = Math.max(radius * 1.15, (pen.holeSawIn * 0.0254) / 2)
     const pDir = new Vector3(pen.pipeDirection[0], pen.pipeDirection[1], pen.pipeDirection[2]).normalize()
     const quat = new Quaternion().setFromUnitVectors(UP, pDir)
     const sleeveMat = pen.codeCompliant ? pool.darkRubber : pool.pexHotRed
     const sleeveLen = pen.memberKind === 'top-plate' ? 0.082 : 0.044 // Proud of 1.5" stud or 3" double top plate by ~3 mm
-    const sleeve = new Mesh(new CylinderGeometry(boreR, boreR, sleeveLen, 16, 1, true), sleeveMat)
+    const sleeveKey = `${boreR.toFixed(4)}|${sleeveLen}`
+    let sleeveGeo = sleeveGeoCache.get(sleeveKey)
+    if (!sleeveGeo) {
+      sleeveGeo = new CylinderGeometry(boreR, boreR, sleeveLen, 16, 1, true)
+      sleeveGeoCache.set(sleeveKey, sleeveGeo)
+    }
+    const sleeve = new Mesh(sleeveGeo, sleeveMat)
     sleeve.position.set(pen.position[0], pen.position[1], pen.position[2])
     sleeve.quaternion.copy(quat)
     g.add(sleeve)
 
-    // Protective steel nail plate on stud face when edge clearance < 1-1/4"
+    // Protective steel nail plates on both stud faces when edge clearance < 1-1/4"
     if (pen.needsNailPlate && pen.memberKind === 'stud') {
-      const plate = new Mesh(new BoxGeometry(0.042, 0.127, 0.005), pool.galvanizedSteel)
-      plate.position.set(pen.position[0], pen.position[1], pen.position[2] + 0.058)
-      g.add(plate)
+      nailPlateGeo ??= new BoxGeometry(0.042, 0.127, 0.005)
+      const [nx, nz] = pen.wallNormal ?? [0, 1]
+      const studHalfDepth = (pen.studDepthM ?? 0.0889) / 2
+      const faceOffset = studHalfDepth + 0.003
+      const yaw = Math.atan2(nx, nz)
+      for (const side of [1, -1] as const) {
+        const plate = new Mesh(nailPlateGeo, pool.galvanizedSteel)
+        plate.position.set(
+          pen.position[0] + nx * side * faceOffset,
+          pen.position[1],
+          pen.position[2] + nz * side * faceOffset,
+        )
+        plate.rotation.y = yaw
+        g.add(plate)
+      }
     }
   }
 

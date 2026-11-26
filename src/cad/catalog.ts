@@ -1,5 +1,5 @@
 /**
- * 42-Model Clean-Room MIT 3D Plumbing CAD Catalog Registry (`src/cad/catalog.ts`).
+ * 47-Model Clean-Room MIT 3D Plumbing CAD Catalog Registry (`src/cad/catalog.ts`).
  * Editor-free and React-free: zero React or `@pascal-app/editor` imports.
  */
 
@@ -92,7 +92,7 @@ export const PLUMBING_CAD_CATALOG: readonly PlumbingCadPartEntry[] = [
   manEntry('copper-distribution-header', 'copper-header', 12, true, 'Type L Copper Trunk Distribution Header', 'IPC 605.3'),
   manEntry('csst-gas-manifold', 'gas-csst', 8, true, '8-Port CSST Fuel-Gas Distribution Manifold', 'IFGC 402.4(15)'),
 
-  // Category 3: Residential & Commercial Fixtures (14)
+  // Category 3: Residential & Commercial Fixtures (18)
   fixEntry('fixture-water-closet', 'water-closet', 'Elongated Water Closet (1.28 GPF)', 'IPC Table 709.1'),
   fixEntry('fixture-lavatory', 'lavatory', 'Vanity Lavatory w/ P-Trap & Angle Stops', 'IPC Table 709.1'),
   fixEntry('fixture-kitchen-sink', 'kitchen-sink', 'Undermount Kitchen Sink w/ Gooseneck Faucet', 'IPC Table 709.1'),
@@ -105,8 +105,12 @@ export const PLUMBING_CAD_CATALOG: readonly PlumbingCadPartEntry[] = [
   fixEntry('fixture-bar-sink', 'bar-sink', 'Wet-Bar Sink Assembly', 'IPC Table 709.1'),
   fixEntry('fixture-floor-drain', 'floor-drain', '2" Cast-Iron Floor Drain w/ Chrome Strainer', 'IPC 413'),
   fixEntry('fixture-hose-bibb', 'hose-bibb', 'Frost-Proof Exterior Hose Bibb w/ Vacuum Breaker', 'IPC 608.15.4.2'),
+  fixEntry('fixture-bidet', 'bidet', 'Heated Bidet Seat & Supply Assembly', 'IPC 408 / NEC 210'),
+  fixEntry('fixture-garbage-disposal', 'garbage-disposal', '3/4 HP Under-Sink Garbage Disposal', 'IPC 416 / NEC 210'),
   fixEntry('fixture-urinal', 'urinal', 'Commercial Wall-Hung Urinal w/ Flushometer', 'IPC Table 709.1'),
   fixEntry('fixture-mop-sink', 'mop-sink', 'Commercial Mop / Service Basin (3" Drain)', 'IPC Table 709.1'),
+  fixEntry('fixture-drinking-fountain', 'drinking-fountain', 'Commercial Wall-Hung Drinking Fountain', 'IPC 410'),
+  fixEntry('fixture-grease-interceptor', 'grease-interceptor', 'Commercial 50 GPM Grease Interceptor', 'IPC 1003.3'),
 
   // Category 4: DWV Fittings & Cleanouts (7)
   fitEntry('fitting-p-trap', 'p-trap', 'DWV Fittings & Cleanouts', '1-1/2" / 2" Solvent-Weld PVC P-Trap', 'IPC 1002.1'),
@@ -123,7 +127,8 @@ export const PLUMBING_CAD_CATALOG: readonly PlumbingCadPartEntry[] = [
   fitEntry('valve-thermostatic-mixing', 'mixing-valve', 'Supply & Fuel-Gas Valves', 'Thermostatic Anti-Scald Mixing Valve', 'IPC 607.1.2'),
   fitEntry('valve-gas-drip-leg', 'gas-drip-leg', 'Supply & Fuel-Gas Valves', 'Fuel-Gas Sediment Trap (Drip Leg) & Shutoff', 'IFGC 408.4 / 409.5'),
 
-  // Category 6: Pipe Runs & Cutaway Assemblies (1 + hanger = 2 -> 43 total, or 42 exact!)
+  // Category 6: Pipe Runs, Hangers & Cutaway Assemblies (2)
+  fitEntry('fitting-pipe-hanger-clevis', 'pipe-hanger-clevis', 'Pipe Runs & Cutaway Assemblies', 'Galvanized Clevis Pipe Hanger w/ Threaded Rod', 'IPC Table 308.5'),
   {
     id: 'assembly-wet-wall-manifold-cutaway',
     category: 'Pipe Runs & Cutaway Assemblies',
