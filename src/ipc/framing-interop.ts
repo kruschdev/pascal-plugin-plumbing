@@ -333,6 +333,83 @@ export function resolveNodeLevelId(
   return null
 }
 
+function getLevelOrderFallback(lvl: SceneNodeLike): number {
+  if (typeof lvl.level === 'number' && Number.isFinite(lvl.level)) return lvl.level
+  if (typeof lvl.baseElevation === 'number' && Number.isFinite(lvl.baseElevation)) return lvl.baseElevation
+  if (typeof lvl.elevation === 'number' && Number.isFinite(lvl.elevation)) return lvl.elevation
+  return 0
+}
+
+function compareSiblingLevels(a: SceneNodeLike, b: SceneNodeLike): number {
+  if (
+    typeof a.level === 'number' &&
+    Number.isFinite(a.level) &&
+    typeof b.level === 'number' &&
+    Number.isFinite(b.level)
+  ) {
+    return a.level - b.level
+  }
+  const elevA =
+    typeof a.baseElevation === 'number' && Number.isFinite(a.baseElevation)
+      ? a.baseElevation
+      : typeof a.elevation === 'number' && Number.isFinite(a.elevation)
+        ? a.elevation
+        : null
+  const elevB =
+    typeof b.baseElevation === 'number' && Number.isFinite(b.baseElevation)
+      ? b.baseElevation
+      : typeof b.elevation === 'number' && Number.isFinite(b.elevation)
+        ? b.elevation
+        : null
+  if (elevA !== null && elevB !== null) {
+    return elevA - elevB
+  }
+  return getLevelOrderFallback(a) - getLevelOrderFallback(b)
+}
+
+/**
+ * Return the IDs of all lower walled sibling levels in the same building as `levelId`,
+ * sorted from lowest to highest story. Returns an empty array when `levelId` is null/missing
+ * or is already the lowest walled level in its building.
+ */
+export function getLowerWalledLevelIds(
+  nodes: Readonly<Record<string, SceneNodeLike>>,
+  levelId: string | null | undefined,
+): string[] {
+  if (!levelId) return []
+  const curLvl = nodes[levelId]
+  if (!curLvl || curLvl.type !== 'level') return []
+  const curBuildingId = typeof curLvl.parentId === 'string' && curLvl.parentId.length > 0 ? curLvl.parentId : null
+
+  const all = Object.values(nodes)
+  const lowerLevels: SceneNodeLike[] = []
+  for (const n of all) {
+    if (n.type !== 'level' || n.id === curLvl.id) continue
+    const oBldg = typeof n.parentId === 'string' && n.parentId.length > 0 ? n.parentId : null
+    if (curBuildingId !== oBldg) continue
+    if (compareSiblingLevels(n, curLvl) < 0) {
+      const hasWalls = all.some((w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, n.id))
+      if (hasWalls) {
+        lowerLevels.push(n)
+      }
+    }
+  }
+  lowerLevels.sort(compareSiblingLevels)
+  return lowerLevels.map((l) => l.id)
+}
+
+/**
+ * Returns `true` if `levelId` is null/missing, has no lower walled sibling levels in the same
+ * building, or is the lowest walled level in its building. Returns `false` for upper stories
+ * (e.g. Floor 1 / Floor 2) when a lower walled ground story exists in the same building.
+ */
+export function isGroundOrLowestWalledLevel(
+  nodes: Readonly<Record<string, SceneNodeLike>>,
+  levelId: string | null | undefined,
+): boolean {
+  return getLowerWalledLevelIds(nodes, levelId).length === 0
+}
+
 const bonesContextCache = new WeakMap<
   Readonly<Record<string, SceneNodeLike>>,
   Map<string, BonesPlumbingContext>

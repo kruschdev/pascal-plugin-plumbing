@@ -23,8 +23,12 @@ import {
   extractBonesPlumbingContext,
   getEquipmentElectricalDemand,
   getFixtureElectricalDemand,
+  getLowerWalledLevelIds,
+  isGroundOrLowestWalledLevel,
   resolveBonesAnchorPosition,
 } from './framing-interop'
+
+export { isGroundOrLowestWalledLevel } from './framing-interop'
 import {
   type RoomPolygon2D,
   type WallOpeningSpan,
@@ -333,6 +337,19 @@ export function planPlumbingAutoPopulate(
       ? null
       : extractBonesPlumbingContext(nodes, levelId)
   const bounds = sceneBounds(walls, rooms)
+  const lowerWalledLevelIds = getLowerWalledLevelIds(nodes, levelId)
+  const isGroundStory = isGroundOrLowestWalledLevel(nodes, levelId)
+  const lowerWaterHeater = !isGroundStory
+    ? (Object.values(nodes).find(
+        (n) =>
+          n.type === 'plumbing:equipment' &&
+          typeof n.equipmentKind === 'string' &&
+          n.equipmentKind.startsWith('water-heater-') &&
+          lowerWalledLevelIds.some((lid) => belongsToLevel(nodes, n, lid)),
+      ) ?? null)
+    : null
+  const emitMainShutoff = isGroundStory
+  const emitWaterHeater = isGroundStory || !lowerWaterHeater
   const clampToBoundsXZ = (x: number, z: number, margin = 0.15): readonly [number, number] => {
     const minX = bounds.minX + margin
     const maxX = bounds.maxX - margin
@@ -772,83 +789,200 @@ export function planPlumbingAutoPopulate(
     }
 
     // 3. Minimum 2 Frost-Proof Exterior Hose Bibbs (Front & Rear per IPC / best practice)
-    // Keep hose bibb & its cold supply tap (+0.06m X) clear of central floor girders, headers & openings!
-    const hoseBibbSpec = FIXTURE_SPECS['hose-bibb']
-    const hoseWsfu = getFixtureWsfu('hose-bibb', occupancy)
-    const pickClearHoseBibbOnSide = (side: 'front' | 'rear'): Vec3 => {
-      const targetZ = side === 'front' ? bounds.maxZ : bounds.minZ
-      const zOffset = side === 'front' ? 0.08 : -0.08
-      const horizWalls = walls
-        .filter((w) => Math.abs(w.start[1] - w.end[1]) < 0.25 && Math.abs(w.end[0] - w.start[0]) >= 0.8)
-        .map((w) => ({
-          z: (w.start[1] + w.end[1]) / 2,
-          minX: Math.min(w.start[0], w.end[0]),
-          maxX: Math.max(w.start[0], w.end[0]),
-        }))
-        .sort((a, b) => Math.abs(a.z - targetZ) - Math.abs(b.z - targetZ))
-      const primaryWall = horizWalls[0]
-      const wallZ = primaryWall ? round2(primaryWall.z + zOffset) : round2(targetZ + zOffset)
-      const minX = primaryWall ? primaryWall.minX + 0.35 : bounds.minX + 0.35
-      const maxX = primaryWall ? primaryWall.maxX - 0.35 : bounds.maxX - 0.35
-      const baseX = primaryWall
-        ? Math.max(minX, Math.min(maxX, bounds.cx))
-        : bounds.cx
-      const isClearAt = (x: number, pad: number): boolean =>
-        !hitsFloorBeamXZ(x, wallZ, pad) &&
-        !hitsFloorBeamXZ(x + 0.06, wallZ, pad) &&
-        !hitsAnyObstacleXZ(x, wallZ, pad * 0.7) &&
-        !hitsAnyObstacleXZ(x + 0.06, wallZ, pad * 0.7) &&
-        !hitsAnyWallOpeningXZ(x, wallZ, 0.22, false)
-      for (const pad of [0.30, 0.16]) {
-        for (const shift of [0, 0.55, -0.55, 0.95, -0.95, 1.4, -1.4, 2.0, -2.0, 2.6, -2.6]) {
-          const cx = round2(Math.max(minX, Math.min(maxX, baseX + shift)))
-          if (isClearAt(cx, pad)) return [cx, hoseBibbSpec.roughInHeightM, wallZ]
+    // Ground / lowest walled story only: never place exterior frost-proof hose bibbs on upper stories!
+    // Always snap flush onto an actual exterior wall segment (never floating in concave L-cutouts or U-courtyards),
+    // and keep the hose bibb + cold supply tap (+0.06m X) clear of floor girders, headers, and openings.
+    if (isGroundStory) {
+      const hoseBibbSpec = FIXTURE_SPECS['hose-bibb']
+      const hoseWsfu = getFixtureWsfu('hose-bibb', occupancy)
+      const pickClearHoseBibbOnSide = (
+        side: 'front' | 'rear',
+      ): { position: Vec3; rotation: number; wallId?: string } => {
+        const targetZ = side === 'front' ? bounds.maxZ : bounds.minZ
+        const defaultZOffset = side === 'front' ? 0.08 : -0.08
+        const defaultRot = side === 'front' ? 0 : Math.PI
+
+        const horizCandidates = walls
+          .filter((w) => w.lengthM >= 0.6 && Math.abs(w.uz) < 0.35)
+          .map((w) => {
+            const midZ = (w.start[1] + w.end[1]) / 2
+            const onSide = side === 'front' ? midZ >= bounds.cz - 0.1 : midZ <= bounds.cz + 0.1
+            return { wall: w, distToTarget: Math.abs(midZ - targetZ), onSide }
+          })
+          .filter((c) => c.onSide)
+          .sort((a, b) => a.distToTarget - b.distToTarget || b.wall.lengthM - a.wall.lengthM)
+
+        const angledFallback = walls
+          .filter((w) => w.lengthM >= 0.6)
+          .map((w) => {
+            const extZ = side === 'front' ? Math.max(w.start[1], w.end[1]) : Math.min(w.start[1], w.end[1])
+            return { wall: w, distToTarget: Math.abs(extZ - targetZ) }
+          })
+          .sort((a, b) => a.distToTarget - b.distToTarget || b.wall.lengthM - a.wall.lengthM)
+
+        const rankedWalls: Array<{ wall: WallSegment2D; distToTarget: number }> = []
+        const seenWallIds = new Set<string>()
+        for (const c of horizCandidates) {
+          if (!seenWallIds.has(c.wall.id)) {
+            seenWallIds.add(c.wall.id)
+            rankedWalls.push({ wall: c.wall, distToTarget: c.distToTarget })
+          }
         }
+        for (const c of angledFallback) {
+          if (!seenWallIds.has(c.wall.id)) {
+            seenWallIds.add(c.wall.id)
+            rankedWalls.push({ wall: c.wall, distToTarget: c.distToTarget })
+          }
+        }
+
+        const resolveOutwardNormal = (w: WallSegment2D): { outNx: number; outNz: number; rot: number } => {
+          if (Math.abs(w.uz) < 0.35 && Math.abs(w.nz) > 0.25) {
+            const desiredZ = side === 'front' ? 1 : -1
+            const sign = w.nz * desiredZ >= 0 ? 1 : -1
+            const outNx = w.nx * sign
+            const outNz = w.nz * sign
+            const rot = Math.abs(outNx) < 1e-3 ? (outNz >= 0 ? 0 : Math.PI) : round2(Math.atan2(outNx, outNz))
+            return { outNx, outNz, rot }
+          }
+          const mx = (w.start[0] + w.end[0]) / 2
+          const mz = (w.start[1] + w.end[1]) / 2
+          const sign = (mx - bounds.cx) * w.nx + (mz - bounds.cz) * w.nz >= 0 ? 1 : -1
+          const outNx = w.nx * sign
+          const outNz = w.nz * sign
+          return { outNx, outNz, rot: round2(Math.atan2(outNx, outNz)) }
+        }
+
+        const isClearAt = (
+          x: number,
+          z: number,
+          w: WallSegment2D | null,
+          alongM: number,
+          pad: number,
+        ): boolean =>
+          !hitsFloorBeamXZ(x, z, pad) &&
+          !hitsFloorBeamXZ(x + 0.06, z, pad) &&
+          !hitsAnyObstacleXZ(x, z, pad * 0.7) &&
+          !hitsAnyObstacleXZ(x + 0.06, z, pad * 0.7) &&
+          (!w || !hitsWallOpening(w.id, alongM, 0.22, false)) &&
+          !hitsAnyWallOpeningXZ(x, z, 0.22, false)
+
+        if (rankedWalls.length > 0) {
+          const minDist = rankedWalls[0]!.distToTarget
+          const outerBand = rankedWalls.filter((c) => c.distToTarget <= minDist + 0.5).map((c) => c.wall)
+          const innerFallback = rankedWalls.filter((c) => c.distToTarget > minDist + 0.5).map((c) => c.wall)
+
+          const sampleWall = (
+            w: WallSegment2D,
+            pad: number,
+          ): { position: Vec3; rotation: number; wallId: string } | null => {
+            const { outNx, outNz, rot } = resolveOutwardNormal(w)
+            const outOffset = Math.max(0.08, Math.min(0.14, w.thicknessM / 2))
+            const margin = Math.min(0.35, w.lengthM * 0.25)
+            const projAlong = (bounds.cx - w.start[0]) * w.ux + (targetZ - w.start[1]) * w.uz
+            const baseAlong = Math.max(margin, Math.min(w.lengthM - margin, projAlong))
+            for (const shift of [0, 0.55, -0.55, 0.95, -0.95, 1.4, -1.4, 2.0, -2.0, 2.6, -2.6]) {
+              const candAlong = Math.max(margin, Math.min(w.lengthM - margin, baseAlong + shift))
+              const bx = round2(w.start[0] + w.ux * candAlong + outNx * outOffset)
+              const bz = round2(w.start[1] + w.uz * candAlong + outNz * outOffset)
+              if (isClearAt(bx, bz, w, candAlong, pad)) {
+                return {
+                  position: [bx, hoseBibbSpec.roughInHeightM, bz],
+                  rotation: rot,
+                  wallId: w.id,
+                }
+              }
+            }
+            return null
+          }
+
+          // Prefer outer exterior facade walls before any recessed wall segments
+          for (const wallGroup of [outerBand, innerFallback]) {
+            for (const pad of [0.30, 0.16]) {
+              for (const w of wallGroup) {
+                const hit = sampleWall(w, pad)
+                if (hit) return hit
+              }
+            }
+          }
+
+          // Guaranteed wall-snapped fallback on the closest exterior wall segment
+          const firstWall = outerBand[0] ?? rankedWalls[0]!.wall
+          const { outNx, outNz, rot } = resolveOutwardNormal(firstWall)
+          const outOffset = Math.max(0.08, Math.min(0.14, firstWall.thicknessM / 2))
+          const margin = Math.min(0.35, firstWall.lengthM * 0.25)
+          const projAlong = (bounds.cx - firstWall.start[0]) * firstWall.ux + (targetZ - firstWall.start[1]) * firstWall.uz
+          const baseAlong = Math.max(margin, Math.min(firstWall.lengthM - margin, projAlong))
+          return {
+            position: [
+              round2(firstWall.start[0] + firstWall.ux * baseAlong + outNx * outOffset),
+              hoseBibbSpec.roughInHeightM,
+              round2(firstWall.start[1] + firstWall.uz * baseAlong + outNz * outOffset),
+            ],
+            rotation: rot,
+            wallId: firstWall.id,
+          }
+        }
+
+        // Wall-less scene fallback
+        const wallZ = round2(targetZ + defaultZOffset)
+        const minX = bounds.minX + 0.35
+        const maxX = bounds.maxX - 0.35
+        const baseX = bounds.cx
+        for (const pad of [0.30, 0.16]) {
+          for (const shift of [0, 0.55, -0.55, 0.95, -0.95, 1.4, -1.4, 2.0, -2.0, 2.6, -2.6]) {
+            const cx = round2(Math.max(minX, Math.min(maxX, baseX + shift)))
+            if (isClearAt(cx, wallZ, null, 0, pad)) {
+              return { position: [cx, hoseBibbSpec.roughInHeightM, wallZ], rotation: defaultRot }
+            }
+          }
+        }
+        return { position: [round2(baseX), hoseBibbSpec.roughInHeightM, wallZ], rotation: defaultRot }
       }
-      return [round2(baseX), hoseBibbSpec.roughInHeightM, wallZ]
+      const frontBibb = pickClearHoseBibbOnSide('front')
+      const rearBibb = pickClearHoseBibbOnSide('rear')
+      fixtures.push(
+        {
+          id: nextFixId(),
+          name: 'Exterior Front Hose Bibb (Frost-Proof)',
+          fixtureKind: 'hose-bibb',
+          position: frontBibb.position,
+          rotation: frontBibb.rotation,
+          roomName: 'Exterior Front',
+          wallId: frontBibb.wallId,
+          dfu: 0,
+          wsfuCold: hoseWsfu.cold,
+          wsfuHot: 0,
+          wsfuTotal: hoseWsfu.total,
+          trapSize: null,
+          drainSize: null,
+          ventSize: null,
+          supplySize: '1/2"',
+          hasVacuumBreaker: true,
+          hasPTrap: false,
+          electricalDemand: null,
+        },
+        {
+          id: nextFixId(),
+          name: 'Exterior Rear Hose Bibb (Frost-Proof)',
+          fixtureKind: 'hose-bibb',
+          position: rearBibb.position,
+          rotation: rearBibb.rotation,
+          roomName: 'Exterior Rear',
+          wallId: rearBibb.wallId,
+          dfu: 0,
+          wsfuCold: hoseWsfu.cold,
+          wsfuHot: 0,
+          wsfuTotal: hoseWsfu.total,
+          trapSize: null,
+          drainSize: null,
+          ventSize: null,
+          supplySize: '1/2"',
+          hasVacuumBreaker: true,
+          hasPTrap: false,
+          electricalDemand: null,
+        },
+      )
     }
-    const frontBibbPos: Vec3 = pickClearHoseBibbOnSide('front')
-    const rearBibbPos: Vec3 = pickClearHoseBibbOnSide('rear')
-    fixtures.push(
-      {
-        id: nextFixId(),
-        name: 'Exterior Front Hose Bibb (Frost-Proof)',
-        fixtureKind: 'hose-bibb',
-        position: frontBibbPos,
-        rotation: 0,
-        roomName: 'Exterior Front',
-        dfu: 0,
-        wsfuCold: hoseWsfu.cold,
-        wsfuHot: 0,
-        wsfuTotal: hoseWsfu.total,
-        trapSize: null,
-        drainSize: null,
-        ventSize: null,
-        supplySize: '1/2"',
-        hasVacuumBreaker: true,
-        hasPTrap: false,
-        electricalDemand: null,
-      },
-      {
-        id: nextFixId(),
-        name: 'Exterior Rear Hose Bibb (Frost-Proof)',
-        fixtureKind: 'hose-bibb',
-        position: rearBibbPos,
-        rotation: Math.PI,
-        roomName: 'Exterior Rear',
-        dfu: 0,
-        wsfuCold: hoseWsfu.cold,
-        wsfuHot: 0,
-        wsfuTotal: hoseWsfu.total,
-        trapSize: null,
-        drainSize: null,
-        ventSize: null,
-        supplySize: '1/2"',
-        hasVacuumBreaker: true,
-        hasPTrap: false,
-        electricalDemand: null,
-      },
-    )
   }
 
   // 4. Place Mechanical Core: Water Entry (PRV + Shutoff), Water Heater, Expansion Tank, PEX Manifold, optional Gas Meter
@@ -978,22 +1112,38 @@ export function planPlumbingAutoPopulate(
   }
 
   let waterEntryPos: Vec3 = [round2(bounds.minX + 0.15), 0.75, round2(whPos[2])]
-  if (bones?.waterEntryAnchor) {
-    const resolved = resolveBonesAnchorPosition(nodes, bones.waterEntryAnchor, 0.75)
-    if (resolved) {
-      waterEntryPos = [round2(resolved[0]), round2(resolved[1] || 0.75), round2(resolved[2])]
-      bonesAnchorsUsed.push(`water-entry (${bones.waterEntryAnchor.nodeId})`)
+  if (emitMainShutoff) {
+    if (bones?.waterEntryAnchor) {
+      const resolved = resolveBonesAnchorPosition(nodes, bones.waterEntryAnchor, 0.75)
+      if (resolved) {
+        waterEntryPos = [round2(resolved[0]), round2(resolved[1] || 0.75), round2(resolved[2])]
+        bonesAnchorsUsed.push(`water-entry (${bones.waterEntryAnchor.nodeId})`)
+      }
+    } else {
+      const [nx, nz] = nudgeOffFloorGirder(waterEntryPos[0], waterEntryPos[2], 0.35, mechNudgeShifts)
+      const [ex, ez] = clampToBoundsXZ(nx, nz, 0.15)
+      waterEntryPos = [ex, 0.75, ez]
     }
-  } else {
-    const [nx, nz] = nudgeOffFloorGirder(waterEntryPos[0], waterEntryPos[2], 0.35, mechNudgeShifts)
-    const [ex, ez] = clampToBoundsXZ(nx, nz, 0.15)
-    waterEntryPos = [ex, 0.75, ez]
   }
 
-  let sewerExitZ = round2(bounds.cz)
-  if (!bones?.sewerExitAnchor && hitsFloorBeamXZ(bounds.maxX, sewerExitZ, 0.35)) {
+  // Ground-story building sewer exit: snap onto actual East exterior wall span on concave L/U footprints
+  // so the horizontal sewer exit never crosses an empty L-cutout, and keep strictly below slab (y <= -0.45m).
+  const eastWalls = walls
+    .filter((w) => Math.abs(w.start[0] - w.end[0]) < 0.25 && Math.abs(w.end[1] - w.start[1]) >= 0.8)
+    .map((w) => ({
+      x: (w.start[0] + w.end[0]) / 2,
+      minZ: Math.min(w.start[1], w.end[1]),
+      maxZ: Math.max(w.start[1], w.end[1]),
+    }))
+    .sort((a, b) => Math.abs(a.x - bounds.maxX) - Math.abs(b.x - bounds.maxX))
+  const eastOuterWall = eastWalls[0] && Math.abs(eastWalls[0].x - bounds.maxX) < 0.5 ? eastWalls[0] : null
+  const sewerMinZ = eastOuterWall ? eastOuterWall.minZ + 0.35 : bounds.minZ + 0.35
+  const sewerMaxZ = eastOuterWall ? eastOuterWall.maxZ - 0.35 : bounds.maxZ - 0.35
+  const sewerBaseZ = sewerMinZ <= sewerMaxZ ? Math.max(sewerMinZ, Math.min(sewerMaxZ, bounds.cz)) : bounds.cz
+  let sewerExitZ = round2(sewerBaseZ)
+  if (isGroundStory && !bones?.sewerExitAnchor && hitsFloorBeamXZ(bounds.maxX, sewerExitZ, 0.35)) {
     for (const shift of [0.65, -0.65, 1.15, -1.15, 1.75, -1.75]) {
-      const cz = round2(Math.max(bounds.minZ + 0.35, Math.min(bounds.maxZ - 0.35, bounds.cz + shift)))
+      const cz = round2(Math.max(sewerMinZ, Math.min(sewerMaxZ, sewerBaseZ + shift)))
       if (!hitsFloorBeamXZ(bounds.maxX, cz, 0.35)) {
         sewerExitZ = cz
         break
@@ -1001,7 +1151,7 @@ export function planPlumbingAutoPopulate(
     }
   }
   let sewerExitPos: Vec3 = [round2(bounds.maxX + 1.2), foundationType === 'slab' ? -0.55 : -0.45, sewerExitZ]
-  if (bones?.sewerExitAnchor) {
+  if (isGroundStory && bones?.sewerExitAnchor) {
     const resolved = resolveBonesAnchorPosition(nodes, bones.sewerExitAnchor, -0.45)
     if (resolved) {
       sewerExitPos = [round2(resolved[0]), foundationType === 'slab' ? -0.55 : -0.45, round2(resolved[2])]
@@ -1027,38 +1177,44 @@ export function planPlumbingAutoPopulate(
     fuelType: whFuel,
   })
 
-  const waterEntryId = nextEqId()
-  equipment.push({
-    id: waterEntryId,
-    name: 'Main Water Shutoff, PRV & Check Valve',
-    equipmentKind: 'main-shutoff-prv',
-    position: waterEntryPos,
-    rotation: 0,
-    roomName: mechRoom?.name ?? 'Utility',
-    electricalDemand: null,
-  })
+  let waterEntryId: string | undefined
+  if (emitMainShutoff) {
+    waterEntryId = nextEqId()
+    equipment.push({
+      id: waterEntryId,
+      name: 'Main Water Shutoff, PRV & Check Valve',
+      equipmentKind: 'main-shutoff-prv',
+      position: waterEntryPos,
+      rotation: 0,
+      roomName: mechRoom?.name ?? 'Utility',
+      electricalDemand: null,
+    })
+  }
 
-  const whId = nextEqId()
-  equipment.push({
-    id: whId,
-    name:
-      waterHeaterKind === 'water-heater-tankless-gas'
-        ? `Tankless Gas Water Heater (${whSizing.recommendedTanklessGpm} GPM)`
-        : waterHeaterKind === 'water-heater-hpwh'
-          ? `Hybrid Heat Pump Water Heater (${whSizing.recommendedTankGal} gal)`
-          : `${whFuel === 'gas' ? 'Gas' : 'Electric'} Water Heater (${whSizing.recommendedTankGal} gal)`,
-    equipmentKind: waterHeaterKind,
-    position: whPos,
-    rotation: 0,
-    roomName: mechRoom?.name ?? 'Utility',
-    capacityGal: waterHeaterKind === 'water-heater-tankless-gas' ? 0 : whSizing.recommendedTankGal,
-    gasBtuh: whSizing.gasBtuh,
-    watts: whSizing.electricalLoadWatts,
-    hasDrainPan: true,
-    hasTpDischarge: true,
-    hasExpansionTank: true,
-    electricalDemand: getEquipmentElectricalDemand(waterHeaterKind, whSizing.electricalLoadWatts),
-  })
+  let whId: string | undefined
+  if (emitWaterHeater) {
+    whId = nextEqId()
+    equipment.push({
+      id: whId,
+      name:
+        waterHeaterKind === 'water-heater-tankless-gas'
+          ? `Tankless Gas Water Heater (${whSizing.recommendedTanklessGpm} GPM)`
+          : waterHeaterKind === 'water-heater-hpwh'
+            ? `Hybrid Heat Pump Water Heater (${whSizing.recommendedTankGal} gal)`
+            : `${whFuel === 'gas' ? 'Gas' : 'Electric'} Water Heater (${whSizing.recommendedTankGal} gal)`,
+      equipmentKind: waterHeaterKind,
+      position: whPos,
+      rotation: 0,
+      roomName: mechRoom?.name ?? 'Utility',
+      capacityGal: waterHeaterKind === 'water-heater-tankless-gas' ? 0 : whSizing.recommendedTankGal,
+      gasBtuh: whSizing.gasBtuh,
+      watts: whSizing.electricalLoadWatts,
+      hasDrainPan: true,
+      hasTpDischarge: true,
+      hasExpansionTank: true,
+      electricalDemand: getEquipmentElectricalDemand(waterHeaterKind, whSizing.electricalLoadWatts),
+    })
+  }
 
   const pickInwardDir = (distM: number): readonly [number, number] => {
     const dirs: ReadonlyArray<readonly [number, number]> = [
@@ -1096,22 +1252,26 @@ export function planPlumbingAutoPopulate(
   }
   const [mechDirX, mechDirZ] = pickInwardDir(0.68)
 
-  const [expX, expZ] = clampToBoundsXZ(whPos[0] + mechDirX * 0.35, whPos[2] + mechDirZ * 0.35, 0.15)
-  const expTankY = round2(Math.min(1.65, Math.max(1.1, levelH - 0.7)))
-  const expTankId = nextEqId()
-  equipment.push({
-    id: expTankId,
-    name: `Thermal Expansion Tank (${whSizing.expansionTankGal} gal, IPC 607.3)`,
-    equipmentKind: 'expansion-tank',
-    position: [expX, expTankY, expZ],
-    rotation: 0,
-    roomName: mechRoom?.name ?? 'Utility',
-    capacityGal: whSizing.expansionTankGal,
-    electricalDemand: null,
-  })
+  if (emitWaterHeater) {
+    const [expX, expZ] = clampToBoundsXZ(whPos[0] + mechDirX * 0.35, whPos[2] + mechDirZ * 0.35, 0.15)
+    const expTankY = round2(Math.min(1.65, Math.max(1.1, levelH - 0.7)))
+    const expTankId = nextEqId()
+    equipment.push({
+      id: expTankId,
+      name: `Thermal Expansion Tank (${whSizing.expansionTankGal} gal, IPC 607.3)`,
+      equipmentKind: 'expansion-tank',
+      position: [expX, expTankY, expZ],
+      rotation: 0,
+      roomName: mechRoom?.name ?? 'Utility',
+      capacityGal: whSizing.expansionTankGal,
+      electricalDemand: null,
+    })
+  }
 
   let manifoldId: string | undefined
-  const [rawManifoldX, rawManifoldZ] = clampToBoundsXZ(whPos[0] + mechDirX * 0.65, whPos[2] + mechDirZ * 0.65, 0.15)
+  const [rawManifoldX, rawManifoldZ] = emitWaterHeater
+    ? clampToBoundsXZ(whPos[0] + mechDirX * 0.65, whPos[2] + mechDirZ * 0.65, 0.15)
+    : [whPos[0], whPos[2]]
   const [nudgedManX, nudgedManZ] = nudgeOffFloorGirder(
     rawManifoldX,
     rawManifoldZ,
@@ -1136,7 +1296,7 @@ export function planPlumbingAutoPopulate(
     })
   }
 
-  // 5. Route Main Cold Supply Service (Water Entry -> Water Heater & Manifold) using true hydraulic velocity sizing
+  // 5. Route Main Cold Supply Service (ground story) or Interior Supply Risers (upper stories)
   const supplyPlaneY = foundationType === 'slab' ? levelH - 0.25 : -0.16
   const mainColdSized = sizeSupplyPipe({
     wsfu: Math.max(1, totalWsfu),
@@ -1145,37 +1305,6 @@ export function planPlumbingAutoPopulate(
     minSize: '3/4"',
     flushType,
   })
-  const mainColdRoute = routePressurizedPipeRun({
-    from: waterEntryPos,
-    to: [whPos[0], 1.55, whPos[2]],
-    routingPlaneY: supplyPlaneY,
-    nominalSize: mainColdSized.size,
-    material: supplyMaterial,
-    euclideanInCavity: false,
-    obstacles,
-    buildingBounds: bounds,
-    maxRoofYAt,
-  })
-  pipeRuns.push({
-    id: nextPipeId(),
-    name: `${mainColdSized.size} Main Cold Water Service`,
-    system: 'cold-water',
-    material: supplyMaterial,
-    nominalSize: mainColdSized.size,
-    path: mainColdRoute.path,
-    slopeInPerFt: 0,
-    dfuLoad: 0,
-    wsfuLoad: round2(totalWsfu),
-    gasBtuh: 0,
-    sourceNodeId: waterEntryId,
-    targetNodeId: whId,
-    hasCleanout: false,
-    hasSedimentTrap: false,
-    hasShutoffWithin6Ft: true,
-    isHorizontalSanTee: false,
-    isMainVentStack: false,
-  })
-
   const totalHotWsfu = round2(fixtures.reduce((s, f) => s + f.wsfuHot, 0))
   const hotMainSized = sizeSupplyPipe({
     wsfu: Math.max(1, totalHotWsfu),
@@ -1185,12 +1314,16 @@ export function planPlumbingAutoPopulate(
     flushType,
   })
 
-  if (manifoldId) {
-    const whToManifoldHot = routePressurizedPipeRun({
-      from: [whPos[0] + 0.1, 1.55, whPos[2]],
-      to: [manifoldPos[0] - 0.12, manifoldPos[1], manifoldPos[2]],
-      routingPlaneY: 1.65,
-      nominalSize: hotMainSized.size,
+  let coldRiserId: string | undefined
+  let hotRiserId: string | undefined
+
+  if (emitWaterHeater && whId) {
+    const coldSourcePos: Vec3 = emitMainShutoff ? waterEntryPos : [whPos[0], supplyPlaneY, whPos[2]]
+    const mainColdRoute = routePressurizedPipeRun({
+      from: coldSourcePos,
+      to: [whPos[0], 1.55, whPos[2]],
+      routingPlaneY: supplyPlaneY,
+      nominalSize: mainColdSized.size,
       material: supplyMaterial,
       euclideanInCavity: false,
       obstacles,
@@ -1199,16 +1332,88 @@ export function planPlumbingAutoPopulate(
     })
     pipeRuns.push({
       id: nextPipeId(),
-      name: `${hotMainSized.size} Hot Header (WH -> PEX Manifold)`,
-      system: 'hot-water',
+      name: emitMainShutoff
+        ? `${mainColdSized.size} Main Cold Water Service`
+        : `${mainColdSized.size} Upper-Story Cold Supply Riser`,
+      system: 'cold-water',
       material: supplyMaterial,
-      nominalSize: hotMainSized.size,
-      path: whToManifoldHot.path,
+      nominalSize: mainColdSized.size,
+      path: mainColdRoute.path,
       slopeInPerFt: 0,
       dfuLoad: 0,
-      wsfuLoad: totalHotWsfu,
+      wsfuLoad: round2(totalWsfu),
       gasBtuh: 0,
-      sourceNodeId: whId,
+      sourceNodeId: waterEntryId,
+      targetNodeId: whId,
+      hasCleanout: false,
+      hasSedimentTrap: false,
+      hasShutoffWithin6Ft: true,
+      isHorizontalSanTee: false,
+      isMainVentStack: false,
+    })
+
+    if (manifoldId) {
+      const whToManifoldHot = routePressurizedPipeRun({
+        from: [whPos[0] + 0.1, 1.55, whPos[2]],
+        to: [manifoldPos[0] - 0.12, manifoldPos[1], manifoldPos[2]],
+        routingPlaneY: 1.65,
+        nominalSize: hotMainSized.size,
+        material: supplyMaterial,
+        euclideanInCavity: false,
+        obstacles,
+        buildingBounds: bounds,
+        maxRoofYAt,
+      })
+      pipeRuns.push({
+        id: nextPipeId(),
+        name: `${hotMainSized.size} Hot Header (WH -> PEX Manifold)`,
+        system: 'hot-water',
+        material: supplyMaterial,
+        nominalSize: hotMainSized.size,
+        path: whToManifoldHot.path,
+        slopeInPerFt: 0,
+        dfuLoad: 0,
+        wsfuLoad: totalHotWsfu,
+        gasBtuh: 0,
+        sourceNodeId: whId,
+        targetNodeId: manifoldId,
+        hasCleanout: false,
+        hasSedimentTrap: false,
+        hasShutoffWithin6Ft: true,
+        isHorizontalSanTee: false,
+        isMainVentStack: false,
+      })
+    }
+  } else {
+    // Upper story served by lower-level water heater: tie into vertical interior Cold & Hot supply risers
+    // strictly inside the building footprint at the upper-story manifold / wet core.
+    const riserAnchorX = manifoldId ? manifoldPos[0] : whPos[0]
+    const riserAnchorZ = manifoldId ? manifoldPos[2] : whPos[2]
+    const riserTopY = manifoldId ? manifoldPos[1] : 1.45
+    const [coldRiserX, coldRiserZ] = clampToBoundsXZ(riserAnchorX + 0.08, riserAnchorZ, 0.15)
+    const coldRiserRoute = routePressurizedPipeRun({
+      from: [coldRiserX, supplyPlaneY, coldRiserZ],
+      to: [coldRiserX, riserTopY, coldRiserZ],
+      routingPlaneY: supplyPlaneY,
+      nominalSize: mainColdSized.size,
+      material: supplyMaterial,
+      euclideanInCavity: false,
+      obstacles,
+      buildingBounds: bounds,
+      maxRoofYAt,
+    })
+    coldRiserId = nextPipeId()
+    pipeRuns.push({
+      id: coldRiserId,
+      name: `${mainColdSized.size} Upper-Story Cold Supply Riser`,
+      system: 'cold-water',
+      material: supplyMaterial,
+      nominalSize: mainColdSized.size,
+      path: coldRiserRoute.path,
+      slopeInPerFt: 0,
+      dfuLoad: 0,
+      wsfuLoad: round2(totalWsfu),
+      gasBtuh: 0,
       targetNodeId: manifoldId,
       hasCleanout: false,
       hasSedimentTrap: false,
@@ -1216,6 +1421,40 @@ export function planPlumbingAutoPopulate(
       isHorizontalSanTee: false,
       isMainVentStack: false,
     })
+
+    if (totalHotWsfu > 0) {
+      const [hotRiserX, hotRiserZ] = clampToBoundsXZ(riserAnchorX - 0.08, riserAnchorZ, 0.15)
+      const hotRiserRoute = routePressurizedPipeRun({
+        from: [hotRiserX, supplyPlaneY + 0.04, hotRiserZ],
+        to: [hotRiserX, riserTopY, hotRiserZ],
+        routingPlaneY: supplyPlaneY + 0.04,
+        nominalSize: hotMainSized.size,
+        material: supplyMaterial,
+        euclideanInCavity: false,
+        obstacles,
+        buildingBounds: bounds,
+        maxRoofYAt,
+      })
+      hotRiserId = nextPipeId()
+      pipeRuns.push({
+        id: hotRiserId,
+        name: `${hotMainSized.size} Upper-Story Hot Supply Riser`,
+        system: 'hot-water',
+        material: supplyMaterial,
+        nominalSize: hotMainSized.size,
+        path: hotRiserRoute.path,
+        slopeInPerFt: 0,
+        dfuLoad: 0,
+        wsfuLoad: totalHotWsfu,
+        gasBtuh: 0,
+        targetNodeId: manifoldId,
+        hasCleanout: false,
+        hasSedimentTrap: false,
+        hasShutoffWithin6Ft: true,
+        isHorizontalSanTee: false,
+        isMainVentStack: false,
+      })
+    }
   }
 
   // Trunk-and-branch spine routing: build a sized 3/4"/1" main Cold Trunk and Hot Trunk along the wet-room corridor,
@@ -1283,7 +1522,7 @@ export function planPlumbingAutoPopulate(
         dfuLoad: 0,
         wsfuLoad: round2(totalWsfu),
         gasBtuh: 0,
-        sourceNodeId: whId,
+        sourceNodeId: whId ?? coldRiserId,
         hasCleanout: false,
         hasSedimentTrap: false,
         hasShutoffWithin6Ft: true,
@@ -1316,7 +1555,7 @@ export function planPlumbingAutoPopulate(
           dfuLoad: 0,
           wsfuLoad: totalHotWsfu,
           gasBtuh: 0,
-          sourceNodeId: whId,
+          sourceNodeId: whId ?? hotRiserId,
           hasCleanout: false,
           hasSedimentTrap: false,
           hasShutoffWithin6Ft: true,
@@ -1443,15 +1682,16 @@ export function planPlumbingAutoPopulate(
   })
   const mainVentSizing = sizeVentStack({ totalDfu, isMainStack: true })
 
-  // Allocate stack & building drain IDs first, route fixture branches to find lowest arrival invert
+  // Allocate stack ID first, route fixture branches to find lowest arrival invert
   // so the Main Building Drain ALWAYS starts at or below every arriving branch drain invert!
   const defaultStackBaseY = foundationType === 'slab' ? -0.45 : -0.34
   const stackId = nextPipeId()
-  const mainDrainId = nextPipeId()
+  const mainDrainId = isGroundStory ? nextPipeId() : undefined
 
   // Route every fixture's DWV branch, Re-Vent, Cold Supply, and Hot Supply
   const supplySourcePos: Vec3 = manifoldId ? manifoldPos : [whPos[0], 1.45, whPos[2]]
-  const supplySourceId = manifoldId ?? whId
+  const coldSupplySourceId = manifoldId ?? whId ?? coldRiserId
+  const hotSupplySourceId = manifoldId ?? whId ?? hotRiserId
   let furthestHotFixture: PlannedFixtureSpec | null = null
   let maxHotDist = 0
   let minBranchArrivalY = defaultStackBaseY
@@ -1576,7 +1816,7 @@ export function planPlumbingAutoPopulate(
         dfuLoad: 0,
         wsfuLoad: fix.wsfuCold,
         gasBtuh: 0,
-        sourceNodeId: coldTrunkId ?? supplySourceId,
+        sourceNodeId: coldTrunkId ?? coldSupplySourceId,
         targetNodeId: fix.id,
         hasCleanout: false,
         hasSedimentTrap: false,
@@ -1626,7 +1866,7 @@ export function planPlumbingAutoPopulate(
         dfuLoad: 0,
         wsfuLoad: fix.wsfuHot,
         gasBtuh: 0,
-        sourceNodeId: hotTrunkId ?? supplySourceId,
+        sourceNodeId: hotTrunkId ?? hotSupplySourceId,
         targetNodeId: fix.id,
         hasCleanout: false,
         hasSedimentTrap: false,
@@ -1641,7 +1881,9 @@ export function planPlumbingAutoPopulate(
   const stackBaseY = Math.floor(Math.min(defaultStackBaseY, minBranchArrivalY) * 10000) / 10000
   pipeRuns.push({
     id: stackId,
-    name: `${mainVentSizing.recommendedSize} Main DWV Soil & Vent Stack (Through Roof)`,
+    name: isGroundStory
+      ? `${mainVentSizing.recommendedSize} Main DWV Soil & Vent Stack (Through Roof)`
+      : `${mainVentSizing.recommendedSize} DWV Soil & Vent Stack Riser`,
     system: 'dwv-vent',
     material: dwvMaterial,
     nominalSize: mainVentSizing.recommendedSize,
@@ -1662,37 +1904,41 @@ export function planPlumbingAutoPopulate(
   })
 
   // Main Building Drain (Stack Base -> Sewer Exit, 1/4"/ft slope, with cleanout)
-  const mainDrainRoute = routeDwvDrainRun({
-    from: [stackPt[0], stackBaseY, stackPt[1]],
-    to: sewerExitPos,
-    nominalSize: buildingDrainSizing.recommendedSize,
-    material: dwvMaterial,
-    foundationType,
-    slopeInPerFt: 0.25,
-    obstacles,
-  })
-  pipeRuns.push({
-    id: mainDrainId,
-    name: `${buildingDrainSizing.recommendedSize} Main Building Drain (${totalDfu} DFU -> Sewer Exit)`,
-    system: 'dwv-drain',
-    material: dwvMaterial,
-    nominalSize: buildingDrainSizing.recommendedSize,
-    path: mainDrainRoute.path,
-    slopeInPerFt: mainDrainRoute.slopeInPerFt,
-    dfuLoad: round2(totalDfu),
-    wsfuLoad: 0,
-    gasBtuh: 0,
-    sourceNodeId: stackId,
-    hasCleanout: true,
-    hasSedimentTrap: false,
-    hasShutoffWithin6Ft: false,
-    isHorizontalSanTee: false,
-    isMainVentStack: false,
-  })
+  // Ground / lowest walled story only: upper stories discharge strictly into the interior vertical soil stack
+  // so no exterior sewer lateral ever juts into mid-air outside upper floors.
+  if (isGroundStory && mainDrainId) {
+    const mainDrainRoute = routeDwvDrainRun({
+      from: [stackPt[0], stackBaseY, stackPt[1]],
+      to: sewerExitPos,
+      nominalSize: buildingDrainSizing.recommendedSize,
+      material: dwvMaterial,
+      foundationType,
+      slopeInPerFt: 0.25,
+      obstacles,
+    })
+    pipeRuns.push({
+      id: mainDrainId,
+      name: `${buildingDrainSizing.recommendedSize} Main Building Drain (${totalDfu} DFU -> Sewer Exit)`,
+      system: 'dwv-drain',
+      material: dwvMaterial,
+      nominalSize: buildingDrainSizing.recommendedSize,
+      path: mainDrainRoute.path,
+      slopeInPerFt: mainDrainRoute.slopeInPerFt,
+      dfuLoad: round2(totalDfu),
+      wsfuLoad: 0,
+      gasBtuh: 0,
+      sourceNodeId: stackId,
+      hasCleanout: true,
+      hasSedimentTrap: false,
+      hasShutoffWithin6Ft: false,
+      isHorizontalSanTee: false,
+      isMainVentStack: false,
+    })
+  }
   pipeRuns.push(...branchPipeRuns)
 
   // 7. Optional Hot Water Recirculation Return Loop (for long hot runs > 40 ft or when requested)
-  if (includeHotRecirc && furthestHotFixture) {
+  if (includeHotRecirc && emitWaterHeater && furthestHotFixture) {
     const recircId = nextEqId()
     const rawRecircX = whPos[0] - 0.35 >= bounds.minX + 0.15 ? whPos[0] - 0.35 : whPos[0] + mechDirX * 0.35
     const rawRecircZ = whPos[0] - 0.35 >= bounds.minX + 0.15 ? whPos[2] : whPos[2] + mechDirZ * 0.35
@@ -1741,27 +1987,31 @@ export function planPlumbingAutoPopulate(
 
   // 8. Optional IFGC Fuel Gas Distribution (only route to actual gas appliances/furnaces; never into electric/HPWH WH!)
   const gasTargets: Array<{ id: string; name: string; pos: Vec3; btuh: number }> = [
-    ...(hasGasWaterHeater && whSizing.gasBtuh > 0
+    ...(emitWaterHeater && whId && hasGasWaterHeater && whSizing.gasBtuh > 0
       ? [{ id: whId, name: 'Gas Water Heater', pos: [whPos[0], 0.65, whPos[2]] as Vec3, btuh: whSizing.gasBtuh }]
       : []),
     ...sceneGasAppliances,
   ]
   if (includeFuelGas && gasTargets.length > 0) {
-    const rawGasMeterZ = whPos[2] + 0.8 <= bounds.maxZ - 0.15 ? whPos[2] + 0.8 : whPos[2] - 0.8
-    const [, gasMeterZ] = clampToBoundsXZ(bounds.minX, rawGasMeterZ, 0.15)
-    const gasMeterPos: Vec3 = [round2(bounds.minX - 0.15), 0.9, gasMeterZ]
-    const gasMeterId = nextEqId()
-    const totalGasBtuh = gasTargets.reduce((sum, t) => sum + t.btuh, 0)
-    equipment.push({
-      id: gasMeterId,
-      name: `Natural Gas Meter (${Math.round(totalGasBtuh / 1000)} kBTU/hr)`,
-      equipmentKind: 'gas-meter',
-      position: gasMeterPos,
-      rotation: 0,
-      roomName: 'Exterior',
-      gasBtuh: 0, // Supply meter, not an appliance load (prevents double-counting appliance BTU/hr)
-      electricalDemand: null,
-    })
+    let gasSourcePos: Vec3 = [whPos[0], supplyPlaneY - 0.06, whPos[2]]
+    let gasSourceId: string | undefined
+    if (isGroundStory) {
+      const rawGasMeterZ = whPos[2] + 0.8 <= bounds.maxZ - 0.15 ? whPos[2] + 0.8 : whPos[2] - 0.8
+      const [, gasMeterZ] = clampToBoundsXZ(bounds.minX, rawGasMeterZ, 0.15)
+      gasSourcePos = [round2(bounds.minX - 0.15), 0.9, gasMeterZ]
+      gasSourceId = nextEqId()
+      const totalGasBtuh = gasTargets.reduce((sum, t) => sum + t.btuh, 0)
+      equipment.push({
+        id: gasSourceId,
+        name: `Natural Gas Meter (${Math.round(totalGasBtuh / 1000)} kBTU/hr)`,
+        equipmentKind: 'gas-meter',
+        position: gasSourcePos,
+        rotation: 0,
+        roomName: 'Exterior',
+        gasBtuh: 0, // Supply meter, not an appliance load (prevents double-counting appliance BTU/hr)
+        electricalDemand: null,
+      })
+    }
     for (const target of gasTargets) {
       const prelimGasSizing = sizeFuelGasPipe({
         totalBtuh: target.btuh,
@@ -1769,7 +2019,7 @@ export function planPlumbingAutoPopulate(
         material: 'black-iron',
       })
       const gasRoute = routePressurizedPipeRun({
-        from: gasMeterPos,
+        from: gasSourcePos,
         to: target.pos,
         routingPlaneY: supplyPlaneY - 0.06,
         nominalSize: prelimGasSizing.recommendedSize,
@@ -1795,7 +2045,7 @@ export function planPlumbingAutoPopulate(
         dfuLoad: 0,
         wsfuLoad: 0,
         gasBtuh: target.btuh,
-        sourceNodeId: gasMeterId,
+        sourceNodeId: gasSourceId,
         targetNodeId: target.id,
         hasCleanout: false,
         hasSedimentTrap: true,

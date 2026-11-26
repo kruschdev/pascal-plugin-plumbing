@@ -10,6 +10,7 @@ import {
   type SceneNodeLike,
   checkWetWallPipeFit,
   extractBonesPlumbingContext,
+  getLowerWalledLevelIds,
   resolveEffectiveWallThicknessM,
   resolveNodeLevelId,
 } from './framing-interop'
@@ -600,10 +601,15 @@ export function auditScenePlumbing(
     }
   }
 
-  // Per-level DWV invariants (each level with drainage requires accessible cleanout & vent stack coverage)
+  // Per-level DWV invariants (each level with drainage requires accessible cleanout & vent stack coverage;
+  // upper stories in a multi-story building inherit stack-base cleanout & main vent stack coverage from
+  // lower walled levels in the same building when present)
   for (const [lvlKey, st] of dwvStateByLevel.entries()) {
     const lvlSuffix = lvlKey !== '__root__' && dwvStateByLevel.size > 1 ? ` (level ${lvlKey})` : ''
-    if (st.hasAnyDwvDrain && !st.hasAnyCleanout) {
+    const lowerIds = lvlKey !== '__root__' ? getLowerWalledLevelIds(nodes, lvlKey) : []
+    const lowerHasCleanout = lowerIds.some((lid) => dwvStateByLevel.get(lid)?.hasAnyCleanout === true)
+    const lowerHasMainVent = lowerIds.some((lid) => dwvStateByLevel.get(lid)?.hasMainVentStack === true)
+    if (st.hasAnyDwvDrain && !st.hasAnyCleanout && !lowerHasCleanout) {
       push({
         severity: 'error',
         codeRef: 'IPC 708.1',
@@ -613,7 +619,7 @@ export function auditScenePlumbing(
         nodeIds: st.sampleDrainIds,
       })
     }
-    if (st.hasAnyDwvDrain && !st.hasMainVentStack) {
+    if (st.hasAnyDwvDrain && !st.hasMainVentStack && !lowerHasMainVent) {
       push({
         severity: 'warning',
         codeRef: 'IPC 903.1',
