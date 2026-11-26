@@ -574,4 +574,15 @@ describe('Phase 1 Gemini 4 Carbon Audit Regression Suite (BUG-01..19, OPT-01..05
     })
     expect(longUnventedAudit.findings.some((f) => f.codeRef.includes('909.1'))).toBe(true)
   })
+
+  test('Cross-trade IFGC gas demand: buildPlumbingSchedule sums gasBtuh from hvac:equipment gas furnaces alongside gas water heaters', () => {
+    const sched = buildPlumbingSchedule({
+      level_0: { id: 'level_0', type: 'level' },
+      meter_1: { id: 'meter_1', type: 'plumbing:equipment', equipmentKind: 'gas-meter', parentId: 'level_0', gasBtuh: 250000 },
+      wh_1: { id: 'wh_1', type: 'plumbing:equipment', equipmentKind: 'water-heater-tank-gas', parentId: 'level_0', gasBtuh: 40000 },
+      furn_1: { id: 'furn_1', type: 'hvac:equipment', equipmentKind: 'gas-furnace-96', parentId: 'level_0', gasBtuh: 80000 },
+    })
+    expect(sched.loads.totalGasBtuh).toBe(120000)
+    expect(sched.loads.recommendedGasMain).not.toBeNull()
+  })
 })

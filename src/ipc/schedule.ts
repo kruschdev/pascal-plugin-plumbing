@@ -317,10 +317,11 @@ export function buildPlumbingSchedule(
   let totalGasBtuh = 0
 
   for (const n of all) {
-    // Exclude supply-source gas-meter from appliance demand summation so totalGasBtuh is never doubled
+    // Exclude supply-source gas-meter from appliance demand summation so totalGasBtuh is never doubled.
+    // Also ingest `hvac:equipment` gas furnaces (zero-coupling cross-trade IFGC gas demand).
     if (
-      n.type === 'plumbing:equipment' &&
-      n.equipmentKind !== 'gas-meter' &&
+      ((n.type === 'plumbing:equipment' && n.equipmentKind !== 'gas-meter') ||
+        n.type === 'hvac:equipment') &&
       typeof n.gasBtuh === 'number' &&
       n.gasBtuh > 0
     ) {
