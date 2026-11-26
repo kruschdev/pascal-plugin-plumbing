@@ -910,4 +910,265 @@ describe('Claims-vs-Reality Audit Fix Regression Suite (PLB-01..PLB-07)', () => 
     expect(PlumbingFixtureNode.parse({ id: 'plumbfix_99', type: 'plumbing:fixture' }).hasVacuumBreaker).toBe(false)
     expect(plumbingFixtureRenderDefinition.defaults!().hasVacuumBreaker).toBe(false)
   })
+
+  test('Cross-Trade & Visual Interop (XT-01, XT-04, XT-10, XT-13, VIS-04): per-wall studSize override, order-independent totalGasBtuh, rotated column AABB, transformer prism + 2-pass electrical claiming, & orthogonal PEX home runs', () => {
+    // XT-01: Per-wall 2x4 override must NOT be inflated by global structural:assembly 2x6 default
+    const global2x6WithInt2x4: Record<string, SceneNodeLike> = {
+      level_0: { id: 'level_0', type: 'level' },
+      str_1: {
+        id: 'str_1',
+        type: 'structural:assembly',
+        parentId: 'level_0',
+        studSize: '2x6',
+        studSpacingIn: 16,
+        wallOverrides: {
+          w_int_2x4: { construction: 'framed', studSize: '2x4', isLoadBearing: false },
+        },
+      },
+      w_int_2x4: {
+        id: 'w_int_2x4',
+        type: 'wall',
+        parentId: 'level_0',
+        start: [0, 0],
+        end: [4, 0],
+        thickness: 0.114,
+        height: 2.6,
+      },
+      pipe_3in: {
+        id: 'pipe_3in',
+        type: 'plumbing:pipe-run',
+        parentId: 'level_0',
+        system: 'dwv-drain',
+        material: 'pvc-dwv',
+        nominalSize: '3"',
+        wallId: 'w_int_2x4',
+        hasCleanout: true,
+        path: [[0.5, 0.8, 0], [2.5, 0.72, 0]],
+      },
+    }
+    const xt01AuditFail = auditScenePlumbing(global2x6WithInt2x4)
+    expect(xt01AuditFail.findings.some((f) => f.codeRef.includes('Wet Wall') && f.nodeIds.includes('pipe_3in'))).toBe(true)
+    const xt01PensFail = computePipeFramingPenetrations({
+      pipeRunId: 'pipe_3in',
+      path: [[0.5, 0.8, 0], [2.5, 0.72, 0]],
+      pipeSize: '3"',
+      material: 'pvc-dwv',
+      walls: extractWallSegments(global2x6WithInt2x4, 'level_0'),
+      bonesContext: extractBonesPlumbingContext(global2x6WithInt2x4, 'level_0'),
+    })
+    expect(xt01PensFail.length).toBeGreaterThan(0)
+    expect(xt01PensFail[0]!.studDepthM).toBeCloseTo(3.5 * INCHES_TO_METERS, 4)
+    expect(xt01PensFail[0]!.codeCompliant).toBe(false)
+
+    // XT-01 converse: global 2x4 with per-wall 2x6 wet-wall override permits 3" vertical DWV pipe
+    const global2x4WithWet2x6: Record<string, SceneNodeLike> = {
+      level_0: { id: 'level_0', type: 'level' },
+      str_1: {
+        id: 'str_1',
+        type: 'structural:assembly',
+        parentId: 'level_0',
+        studSize: '2x4',
+        studSpacingIn: 16,
+        wallOverrides: {
+          w_wet_2x6: { construction: 'framed', studSize: '2x6', isWetWall: true },
+        },
+      },
+      w_wet_2x6: {
+        id: 'w_wet_2x6',
+        type: 'wall',
+        parentId: 'level_0',
+        start: [0, 0],
+        end: [4, 0],
+        thickness: 0.114,
+        height: 2.6,
+      },
+      stack_3in: {
+        id: 'stack_3in',
+        type: 'plumbing:pipe-run',
+        parentId: 'level_0',
+        system: 'dwv-vent',
+        material: 'pvc-dwv',
+        nominalSize: '3"',
+        wallId: 'w_wet_2x6',
+        isMainVentStack: true,
+        hasCleanout: true,
+        path: [[2, -0.34, 0], [2, 3.0, 0]],
+      },
+    }
+    const xt01AuditPass = auditScenePlumbing(global2x4WithWet2x6)
+    expect(xt01AuditPass.findings.some((f) => f.codeRef.includes('Wet Wall'))).toBe(false)
+    const xt01PensPass = computePipeFramingPenetrations({
+      pipeRunId: 'stack_3in',
+      path: [[2, -0.34, 0], [2, 3.0, 0]],
+      pipeSize: '3"',
+      material: 'pvc-dwv',
+      walls: extractWallSegments(global2x4WithWet2x6, 'level_0'),
+      bonesContext: extractBonesPlumbingContext(global2x4WithWet2x6, 'level_0'),
+    })
+    expect(xt01PensPass.length).toBeGreaterThan(0)
+    expect(xt01PensPass[0]!.studDepthM).toBeCloseTo(5.5 * INCHES_TO_METERS, 4)
+    expect(xt01PensPass[0]!.codeCompliant).toBe(true)
+
+    // XT-04: Order-independent totalGasBtuh (pipe run before appliances vs after appliances)
+    const gasPipeNode: SceneNodeLike = {
+      id: 'pipe_gas_main',
+      type: 'plumbing:pipe-run',
+      parentId: 'level_0',
+      system: 'fuel-gas',
+      material: 'black-iron',
+      nominalSize: '1"',
+      gasBtuh: 120000,
+      path: [[0, 0.5, 0], [8, 0.5, 0]],
+    }
+    const whNode: SceneNodeLike = {
+      id: 'wh_gas',
+      type: 'plumbing:equipment',
+      equipmentKind: 'water-heater-tank-gas',
+      parentId: 'level_0',
+      gasBtuh: 40000,
+    }
+    const furnNode: SceneNodeLike = {
+      id: 'furn_gas',
+      type: 'hvac:equipment',
+      parentId: 'level_0',
+      gasBtuh: 80000,
+    }
+    const pipeFirst = buildPlumbingSchedule({
+      level_0: { id: 'level_0', type: 'level' },
+      pipe_gas_main: gasPipeNode,
+      wh_gas: whNode,
+      furn_gas: furnNode,
+    })
+    const pipeLast = buildPlumbingSchedule({
+      level_0: { id: 'level_0', type: 'level' },
+      wh_gas: whNode,
+      furn_gas: furnNode,
+      pipe_gas_main: gasPipeNode,
+    })
+    expect(pipeFirst.loads.totalGasBtuh).toBe(120000)
+    expect(pipeLast.loads.totalGasBtuh).toBe(120000)
+
+    // XT-10 & XT-13: Rotated rectangular columns & floor-anchored electrical:transformer prism
+    const obsScene: Record<string, SceneNodeLike> = {
+      level_0: { id: 'level_0', type: 'level' },
+      col_struct_rot: {
+        id: 'col_struct_rot',
+        type: 'structural:column',
+        parentId: 'level_0',
+        position: [3, 0, 3],
+        widthIn: 12,
+        depthIn: 4,
+        heightM: 3.0,
+        rotation: Math.PI / 2,
+      },
+      col_plain_rot: {
+        id: 'col_plain_rot',
+        type: 'column',
+        parentId: 'level_0',
+        position: [6, 0, 3],
+        width: 0.6,
+        depth: 0.2,
+        height: 2.8,
+        rotation: [0, Math.PI / 2, 0],
+      },
+      xfmr_1: {
+        id: 'xfmr_1',
+        type: 'electrical:transformer',
+        name: '45 kVA Dry Transformer',
+        parentId: 'level_0',
+        position: [1, 0, 5],
+        height: 1.5,
+      },
+    }
+    const obsList = extractPlumbingObstacles(obsScene, 'level_0')
+    const sCol = obsList.find((o) => o.id === 'col_struct_rot')!
+    expect(sCol.box.maxX - sCol.box.minX).toBeCloseTo(4 * INCHES_TO_METERS, 4)
+    expect(sCol.box.maxZ - sCol.box.minZ).toBeCloseTo(12 * INCHES_TO_METERS, 4)
+    const pCol = obsList.find((o) => o.id === 'col_plain_rot')!
+    expect(pCol.box.maxX - pCol.box.minX).toBeCloseTo(0.2, 4)
+    expect(pCol.box.maxZ - pCol.box.minZ).toBeCloseTo(0.6, 4)
+    const xfmrObs = obsList.find((o) => o.id === 'xfmr_1')!
+    expect(xfmrObs.box.maxX - xfmrObs.box.minX).toBeCloseTo(0.76 + 0.06, 4)
+    expect(xfmrObs.box.maxZ - xfmrObs.box.minZ).toBeCloseTo(0.64 + 0.06, 4)
+    expect(xfmrObs.box.maxY).toBeCloseTo(1.5 + 1.83, 2)
+
+    // XT-13: 2-pass electrical coordination with exclusive claimedDeviceIds
+    const coordOneDevice = buildElectricalCoordination({
+      level_0: { id: 'level_0', type: 'level' },
+      dw_1: { id: 'dw_1', type: 'plumbing:fixture', fixtureKind: 'dishwasher', parentId: 'level_0', position: [2.0, 0.4, 1.0] },
+      disp_1: { id: 'disp_1', type: 'plumbing:fixture', fixtureKind: 'garbage-disposal', parentId: 'level_0', position: [2.25, 0.4, 1.0] },
+      dev_single: {
+        id: 'dev_single',
+        type: 'electrical:device',
+        parentId: 'level_0',
+        position: [2.05, 0.4, 1.0],
+        panelId: 'mdp_1',
+        circuitNumber: 12,
+        poles: 1,
+        breakerAmps: 20,
+      },
+    })
+    expect(coordOneDevice.filter((r) => r.wired).length).toBe(1)
+    expect(coordOneDevice.filter((r) => !r.wired).length).toBe(1)
+
+    // Pass 1 explicit mepSourceNodeId wins over a closer unlinked fixture
+    const coordExplicitWins = buildElectricalCoordination({
+      level_0: { id: 'level_0', type: 'level' },
+      dw_1: { id: 'dw_1', type: 'plumbing:fixture', fixtureKind: 'dishwasher', parentId: 'level_0', position: [2.0, 0.4, 1.0] },
+      disp_1: { id: 'disp_1', type: 'plumbing:fixture', fixtureKind: 'garbage-disposal', parentId: 'level_0', position: [2.5, 0.4, 1.0] },
+      dev_linked: {
+        id: 'dev_linked',
+        type: 'electrical:device',
+        parentId: 'level_0',
+        position: [2.0, 0.4, 1.0],
+        panelId: 'mdp_1',
+        circuitNumber: 14,
+        poles: 1,
+        breakerAmps: 20,
+        metadata: { mepSourceNodeId: 'disp_1' },
+      },
+    })
+    expect(coordExplicitWins.find((r) => r.sourceNodeId === 'disp_1')!.wired).toBe(true)
+    expect(coordExplicitWins.find((r) => r.sourceNodeId === 'dw_1')!.wired).toBe(false)
+
+    // VIS-04: Manifold PEX home runs & hot-recirc route cleanly orthogonally (zero diagonal spiderweb segments)
+    const visScene: Record<string, SceneNodeLike> = {
+      level_0: { id: 'level_0', type: 'level' },
+      w1: { id: 'w1', type: 'wall', parentId: 'level_0', start: [0, 0], end: [10, 0], thickness: 0.165, height: 2.6 },
+      w2: { id: 'w2', type: 'wall', parentId: 'level_0', start: [0, 8], end: [10, 8], thickness: 0.165, height: 2.6 },
+      z_bath: { id: 'z_bath', type: 'zone', name: 'Bathroom', parentId: 'level_0', polygon: [[0, 0], [4, 0], [4, 4], [0, 4]] },
+      z_kit: { id: 'z_kit', type: 'zone', name: 'Kitchen', parentId: 'level_0', polygon: [[5, 0], [10, 0], [10, 4], [5, 4]] },
+      z_util: { id: 'z_util', type: 'zone', name: 'Utility', parentId: 'level_0', polygon: [[0, 4], [4, 4], [4, 8], [0, 8]] },
+    }
+    for (const foundationType of ['crawlspace', 'slab'] as const) {
+      const visPlan = planPlumbingAutoPopulate(visScene, {
+        levelId: 'level_0',
+        supplyTopology: 'manifold',
+        foundationType,
+        includeHotRecirc: true,
+      })
+      const supplyRuns = visPlan.pipeRuns.filter(
+        (r) => r.system === 'cold-water' || r.system === 'hot-water' || r.system === 'hot-recirc',
+      )
+      expect(supplyRuns.length).toBeGreaterThan(5)
+      for (const r of supplyRuns) {
+        for (let i = 1; i < r.path.length; i++) {
+          const a = r.path[i - 1]!
+          const b = r.path[i]!
+          const dx = Math.abs(b[0] - a[0])
+          const dz = Math.abs(b[2] - a[2])
+          // Every horizontal segment must be orthogonal (either X-aligned or Z-aligned, never diagonal)
+          if (dx > 0.02 || dz > 0.02) {
+            expect(Math.min(dx, dz)).toBeLessThan(0.01)
+          }
+        }
+      }
+      const fullVis: Record<string, SceneNodeLike> = { ...visScene }
+      for (const eq of visPlan.equipment) fullVis[eq.id] = { ...eq, type: 'plumbing:equipment', parentId: 'level_0' }
+      for (const m of visPlan.manifolds) fullVis[m.id] = { ...m, type: 'plumbing:manifold', parentId: 'level_0' }
+      for (const f of visPlan.fixtures) fullVis[f.id] = { ...f, type: 'plumbing:fixture', parentId: 'level_0' }
+      for (const r of visPlan.pipeRuns) fullVis[r.id] = { ...r, type: 'plumbing:pipe-run', parentId: 'level_0' }
+      expect(auditScenePlumbing(fullVis).errorCount).toBe(0)
+    }
+  })
 })

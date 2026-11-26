@@ -178,35 +178,65 @@ export function buildElectricalCoordination(
     }
   }
 
-  const rows: ElectricalCoordinationRow[] = []
+  const poweredUnits: Array<{
+    node: SceneNodeLike
+    demand: ElectricalPowerDemand
+    nodeLevelId: string | null
+    pos: readonly [number, number, number] | null
+  }> = []
 
   for (const n of all) {
     if (n.type !== 'plumbing:equipment' && n.type !== 'plumbing:fixture') continue
     const demand = resolveNodeElectricalDemand(n)
     if (!demand || !demand.required) continue
+    const pos =
+      Array.isArray(n.position) && n.position.length >= 3
+        ? ([Number(n.position[0]), Number(n.position[1]), Number(n.position[2])] as const)
+        : null
+    poweredUnits.push({
+      node: n,
+      demand,
+      nodeLevelId: resolveNodeLevelId(nodes, n),
+      pos,
+    })
+  }
 
-    const nodeLevelId = resolveNodeLevelId(nodes, n)
-    const pos = Array.isArray(n.position) && n.position.length >= 3 ? n.position : null
-    let matchedDevice: SceneNodeLike | undefined
+  // 2-pass matching with exclusive device claiming:
+  // Pass 1: Explicit `mepSourceNodeId` link (direct or inside metadata) always wins first
+  // Pass 2: Closest unclaimed same-level proximity match (prevents two adjacent fixtures claiming one device)
+  const claimedDeviceIds = new Set<string>()
+  const matchedBySourceId = new Map<string, SceneNodeLike>()
+
+  for (const unit of poweredUnits) {
     for (const d of elecDevices) {
-      // Explicit source link (direct or inside metadata) always wins
+      if (claimedDeviceIds.has(d.id)) continue
       const meta = d.metadata as { mepSourceNodeId?: string } | undefined
-      if (d.mepSourceNodeId === n.id || meta?.mepSourceNodeId === n.id) {
-        matchedDevice = d
+      if (d.mepSourceNodeId === unit.node.id || meta?.mepSourceNodeId === unit.node.id) {
+        matchedBySourceId.set(unit.node.id, d)
+        claimedDeviceIds.add(d.id)
         break
       }
+    }
+  }
+
+  for (const unit of poweredUnits) {
+    if (matchedBySourceId.has(unit.node.id) || !unit.pos) continue
+    let bestDevice: SceneNodeLike | undefined
+    let bestDist = Infinity
+    for (const d of elecDevices) {
+      if (claimedDeviceIds.has(d.id)) continue
       // Never match devices across different building levels!
-      if (resolveNodeLevelId(nodes, d) !== nodeLevelId) continue
+      if (resolveNodeLevelId(nodes, d) !== unit.nodeLevelId) continue
 
       const dPos = Array.isArray(d.position) && d.position.length >= 3 ? d.position : null
-      if (!pos || !dPos) continue
-      const dist = Math.hypot(pos[0] - dPos[0], pos[2] - dPos[2])
+      if (!dPos) continue
+      const dist = Math.hypot(unit.pos[0] - dPos[0], unit.pos[2] - dPos[2])
       const dPoles = typeof d.poles === 'number' ? d.poles : 1
       const dAmps = typeof d.breakerAmps === 'number' ? d.breakerAmps : 15
-      if (dist > 1.5 || dPoles < demand.poles || dAmps < demand.breakerAmps) continue
+      if (dist > 1.5 || dPoles < unit.demand.poles || dAmps < unit.demand.breakerAmps) continue
 
       // When the plumbing load requires a dedicated circuit, require a dedicated/single-load circuit match
-      if (demand.dedicatedCircuit) {
+      if (unit.demand.dedicatedCircuit) {
         const isDedicatedKind = d.deviceKind === 'dedicated-240v' || dPoles >= 2
         const cktKey =
           typeof d.circuitNumber === 'number' && d.circuitNumber > 0
@@ -215,11 +245,20 @@ export function buildElectricalCoordination(
         const isSingleLoadCircuit = cktKey !== null && (circuitDeviceCounts.get(cktKey) ?? 0) === 1
         if (!isDedicatedKind && !isSingleLoadCircuit) continue
       }
-      matchedDevice = d
-      break
+      if (dist < bestDist) {
+        bestDist = dist
+        bestDevice = d
+      }
     }
+    if (bestDevice) {
+      matchedBySourceId.set(unit.node.id, bestDevice)
+      claimedDeviceIds.add(bestDevice.id)
+    }
+  }
 
-    rows.push({
+  const rows: ElectricalCoordinationRow[] = poweredUnits.map(({ node: n, demand }) => {
+    const matchedDevice = matchedBySourceId.get(n.id)
+    return {
       sourceNodeId: n.id,
       sourceType: n.type as 'plumbing:equipment' | 'plumbing:fixture',
       label: demand.label,
@@ -233,8 +272,8 @@ export function buildElectricalCoordination(
       matchedElectricalDeviceId: matchedDevice?.id,
       matchedCircuitNumber:
         typeof matchedDevice?.circuitNumber === 'number' ? matchedDevice.circuitNumber : undefined,
-    })
-  }
+    }
+  })
   return rows
 }
 
@@ -327,7 +366,8 @@ export function buildPlumbingSchedule(
   // Group pipe runs by (system, material, nominalSize)
   const pipeMap = new Map<string, PipeSystemSummaryRow>()
   let longestGasFt = 0
-  let totalGasBtuh = 0
+  let applianceGasBtuh = 0
+  let maxPipeGasBtuh = 0
   let hasCsstGas = false
   let hasBlackIronGas = false
 
@@ -343,7 +383,7 @@ export function buildPlumbingSchedule(
       typeof n.gasBtuh === 'number' &&
       n.gasBtuh > 0
     ) {
-      totalGasBtuh += n.gasBtuh
+      applianceGasBtuh += n.gasBtuh
     }
     if (n.type !== 'plumbing:pipe-run') continue
     const system = (n.system as PlumbingSystem) || 'cold-water'
@@ -356,8 +396,8 @@ export function buildPlumbingSchedule(
       longestGasFt = Math.max(longestGasFt, lengthFt)
       if (material === 'csst') hasCsstGas = true
       if (material === 'black-iron') hasBlackIronGas = true
-      if (typeof n.gasBtuh === 'number' && n.gasBtuh > totalGasBtuh) {
-        totalGasBtuh = n.gasBtuh
+      if (typeof n.gasBtuh === 'number' && n.gasBtuh > maxPipeGasBtuh) {
+        maxPipeGasBtuh = n.gasBtuh
       }
     }
 
@@ -376,6 +416,7 @@ export function buildPlumbingSchedule(
       })
     }
   }
+  const totalGasBtuh = Math.max(applianceGasBtuh, maxPipeGasBtuh)
 
   const flushType = occupancy === 'commercial' ? 'flushometer' : 'flush-tank'
   const drainSizing = sizeBuildingDrain({

@@ -260,6 +260,8 @@ export type BonesWallRule = {
   construction: BonesWallConstruction
   spacingIn: 12 | 16 | 24
   studThicknessM: number
+  /** Per-wall stud cavity depth in inches from `structural:assembly.wallOverrides[id].studSize` (`5.5` for 2x6, `3.5` for 2x4). */
+  studDepthIn?: number
   isLoadBearing?: boolean
   isWetWall?: boolean
 }
@@ -419,10 +421,13 @@ export function extractBonesPlumbingContext(
             : rawSpacing === 24
               ? 24
               : defaultSpacingIn
+      const studDepthIn: number | undefined =
+        r.studSize === '2x6' ? 5.5 : r.studSize === '2x4' ? 3.5 : undefined
       wallRules.set(wallId, {
         construction,
         spacingIn,
         studThicknessM: DRESSED_STUD_THICKNESS_M,
+        ...(typeof studDepthIn === 'number' ? { studDepthIn } : {}),
         isLoadBearing: Boolean(r.isLoadBearing || r.isShearWall || r.construction === 'shear-wall'),
         isWetWall: Boolean(r.isWetWall),
       })
@@ -468,6 +473,25 @@ export function extractBonesPlumbingContext(
   }
   byLevel.set(key, ctx)
   return ctx
+}
+
+/**
+ * Resolve effective wall thickness (m) honoring per-wall `structural:assembly` `wallOverrides[id].studSize`
+ * first (without inflating a `2x4` interior partition to a global `2x6` default), falling back to global
+ * `defaultStudDepthIn` when no per-wall override is present.
+ */
+export function resolveEffectiveWallThicknessM(
+  wallThicknessM: number,
+  bonesContext?: BonesPlumbingContext | null,
+  wallRule?: BonesWallRule,
+): number {
+  if (typeof wallRule?.studDepthIn === 'number') {
+    return wallRule.studDepthIn * INCHES_TO_METERS + INCHES_TO_METERS
+  }
+  if (bonesContext?.source === 'structural' && typeof bonesContext.defaultStudDepthIn === 'number') {
+    return Math.max(wallThicknessM, bonesContext.defaultStudDepthIn * INCHES_TO_METERS + INCHES_TO_METERS)
+  }
+  return wallThicknessM
 }
 
 /**
@@ -645,10 +669,7 @@ export function computePipeFramingPenetrations(params: {
       const rule = bonesContext?.wallRules.get(wall.id)
       if (rule?.construction === 'skip' || rule?.construction === 'cmu') continue
       const spacingM = (rule?.spacingIn ?? defaultSpacingIn) * INCHES_TO_METERS
-      const effectiveWallThicknessM =
-        bonesContext?.source === 'structural' && typeof bonesContext.defaultStudDepthIn === 'number'
-          ? Math.max(wall.thicknessM, bonesContext.defaultStudDepthIn * INCHES_TO_METERS + INCHES_TO_METERS)
-          : wall.thicknessM
+      const effectiveWallThicknessM = resolveEffectiveWallThicknessM(wall.thicknessM, bonesContext, rule)
       const studDepthM = Math.max(0.0889, effectiveWallThicknessM - INCHES_TO_METERS)
       const halfThick = effectiveWallThicknessM / 2 + 0.04
 

@@ -10,6 +10,7 @@ import {
   type SceneNodeLike,
   checkWetWallPipeFit,
   extractBonesPlumbingContext,
+  resolveEffectiveWallThicknessM,
   resolveNodeLevelId,
 } from './framing-interop'
 import {
@@ -306,10 +307,7 @@ export function auditScenePlumbing(
       const wall = levelWallMap.get(run.wallId)!
       const bonesCtx = getBonesForLevel(runLevelId)
       const wallRule = bonesCtx.wallRules.get(wall.id)
-      const effectiveWallThicknessM =
-        bonesCtx.source === 'structural' && typeof bonesCtx.defaultStudDepthIn === 'number'
-          ? Math.max(wall.thicknessM, bonesCtx.defaultStudDepthIn * 0.0254 + 0.0254)
-          : wall.thicknessM
+      const effectiveWallThicknessM = resolveEffectiveWallThicknessM(wall.thicknessM, bonesCtx, wallRule)
       const fit = checkWetWallPipeFit({
         wallThicknessM: effectiveWallThicknessM,
         pipeSize: size,

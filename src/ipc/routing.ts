@@ -329,6 +329,13 @@ export function extractPlumbingObstacles(
   const obstacles: PlumbingObstacle[] = []
   const levelH = resolveLevelHeightM(nodes, levelId)
 
+  const extractYaw = (rawRot: unknown): number =>
+    typeof rawRot === 'number'
+      ? rawRot
+      : Array.isArray(rawRot) && rawRot.length >= 2
+        ? Number(rawRot[1] ?? 0)
+        : 0
+
   for (const n of Object.values(nodes)) {
     if (!belongsToLevel(nodes, n, levelId)) continue
     const pos = Array.isArray(n.position) && n.position.length >= 3
@@ -339,6 +346,11 @@ export function extractPlumbingObstacles(
       const w = (typeof n.widthIn === 'number' ? n.widthIn : 5.5) * INCHES_TO_METERS
       const d = (typeof n.depthIn === 'number' ? n.depthIn : 5.5) * INCHES_TO_METERS
       const h = typeof n.heightM === 'number' ? n.heightM : levelH
+      const rot = extractYaw(n.rotation)
+      const cosR = Math.abs(Math.cos(rot))
+      const sinR = Math.abs(Math.sin(rot))
+      const halfX = (w * cosR + d * sinR) / 2
+      const halfZ = (w * sinR + d * cosR) / 2
       obstacles.push({
         id: n.id,
         nodeId: n.id,
@@ -346,12 +358,12 @@ export function extractPlumbingObstacles(
         structuralKind: 'column',
         label: `Structural column ${String(n.designation ?? n.columnType ?? '')} (${n.name ?? n.id})`.trim(),
         box: {
-          minX: pos[0] - w / 2,
-          maxX: pos[0] + w / 2,
+          minX: pos[0] - halfX,
+          maxX: pos[0] + halfX,
           minY: pos[1],
           maxY: pos[1] + h,
-          minZ: pos[2] - d / 2,
-          maxZ: pos[2] + d / 2,
+          minZ: pos[2] - halfZ,
+          maxZ: pos[2] + halfZ,
         },
       })
     } else if (n.type === 'structural:beam' && Array.isArray(n.start) && Array.isArray(n.end)) {
@@ -411,6 +423,11 @@ export function extractPlumbingObstacles(
       const w = typeof n.width === 'number' ? n.width : 0.25
       const d = typeof n.depth === 'number' ? n.depth : 0.25
       const h = typeof n.height === 'number' ? n.height : levelH
+      const rot = extractYaw(n.rotation)
+      const cosR = Math.abs(Math.cos(rot))
+      const sinR = Math.abs(Math.sin(rot))
+      const halfX = (w * cosR + d * sinR) / 2
+      const halfZ = (w * sinR + d * cosR) / 2
       obstacles.push({
         id: n.id,
         nodeId: n.id,
@@ -418,12 +435,12 @@ export function extractPlumbingObstacles(
         structuralKind: 'column',
         label: `Structural column (${n.name ?? n.id})`,
         box: {
-          minX: pos[0] - w / 2,
-          maxX: pos[0] + w / 2,
+          minX: pos[0] - halfX,
+          maxX: pos[0] + halfX,
           minY: pos[1],
           maxY: pos[1] + h,
-          minZ: pos[2] - d / 2,
-          maxZ: pos[2] + d / 2,
+          minZ: pos[2] - halfZ,
+          maxZ: pos[2] + halfZ,
         },
       })
     } else if (n.type === 'beam' && Array.isArray(n.start) && Array.isArray(n.end)) {
@@ -480,15 +497,18 @@ export function extractPlumbingObstacles(
         })
       }
     } else if ((n.type === 'electrical:panel' || n.type === 'electrical:transformer') && pos) {
-      // NEC 110.26(E)(1)(a): Dedicated space equal to width & depth of panel extending from floor (y = 0) to 6 ft above (or ceiling)
-      const w = typeof n.width === 'number' ? n.width : 0.42
-      const d = typeof n.depth === 'number' ? n.depth : 0.16
-      const rot = typeof n.rotation === 'number' ? n.rotation : 0
+      // NEC 110.26(E)(1)(a): Dedicated space equal to width & depth of panel/transformer extending from floor (y = 0) to 6 ft above (or ceiling)
+      const isTransformer = n.type === 'electrical:transformer'
+      const w = typeof n.width === 'number' ? n.width : isTransformer ? 0.76 : 0.42
+      const d = typeof n.depth === 'number' ? n.depth : isTransformer ? 0.64 : 0.16
+      const rot = extractYaw(n.rotation)
       const cosR = Math.abs(Math.cos(rot))
       const sinR = Math.abs(Math.sin(rot))
       const halfX = (w * cosR + d * sinR) / 2 + 0.03
       const halfZ = (w * sinR + d * cosR) / 2 + 0.03
-      const panelTopY = pos[1] + (typeof n.height === 'number' ? n.height / 2 : 0.46)
+      const topY = isTransformer
+        ? pos[1] + (typeof n.height === 'number' ? n.height : 0.95)
+        : pos[1] + (typeof n.height === 'number' ? n.height / 2 : 0.46)
       obstacles.push({
         id: n.id,
         nodeId: n.id,
@@ -498,7 +518,7 @@ export function extractPlumbingObstacles(
           minX: pos[0] - halfX,
           maxX: pos[0] + halfX,
           minY: 0,
-          maxY: Math.max(levelH + 0.6, panelTopY + 1.83), // Floor to 6 ft above panel
+          maxY: Math.max(levelH + 0.6, topY + 1.83), // Floor to 6 ft above panel/transformer
           minZ: pos[2] - halfZ,
           maxZ: pos[2] + halfZ,
         },

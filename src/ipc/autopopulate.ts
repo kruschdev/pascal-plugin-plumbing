@@ -554,23 +554,104 @@ export function planPlumbingAutoPopulate(
   }
 
   // 4. Place Mechanical Core: Water Entry (PRV + Shutoff), Water Heater, Expansion Tank, PEX Manifold, optional Gas Meter
+  // Prefer a dedicated Utility/Garage/Laundry room; when none exists, tuck the mechanical core cleanly into
+  // a corner alcove of the wet core (Kitchen/Bath) instead of dropping a water heater in the middle of a Living Room,
+  // and stay clear of any existing floor-mounted HVAC equipment or NEC 110.26 electrical panels.
+  const dedicatedMechRoom =
+    rooms.find((r) => r.category === 'utility' || r.category === 'garage' || r.category === 'laundry') ?? null
   const mechRoom =
-    rooms.find((r) => r.category === 'utility' || r.category === 'garage' || r.category === 'laundry') ??
+    dedicatedMechRoom ??
+    rooms.find((r) => r.category === 'kitchen' || r.category === 'commercial-kitchen') ??
+    rooms.find((r) => r.category === 'bathroom' || r.category === 'master-bath' || r.category === 'commercial-restroom') ??
     rooms[0] ??
     null
 
-  const nudgeOffStructuralBeams = (x: number, z: number): [number, number] => {
-    const floorBeams = obstacles.filter((o) => o.category === 'structural' && o.box.minY < 0.15)
-    if (floorBeams.length === 0) return [round2(x), round2(z)]
-    const hitsBeam = (cx: number, cz: number): boolean =>
-      floorBeams.some(
-        (b) =>
-          cx >= b.box.minX - 0.35 &&
-          cx <= b.box.maxX + 0.35 &&
-          cz >= b.box.minZ - 0.35 &&
-          cz <= b.box.maxZ + 0.35,
+  const crossTradeFloorEquip: Array<{ x: number; z: number; minClearM: number }> = []
+  for (const n of Object.values(nodes)) {
+    if (!belongsToLevel(nodes, n, levelId)) continue
+    if (!Array.isArray(n.position) || n.position.length < 3) continue
+    const ny = Number(n.position[1] ?? 0)
+    // Ignore attic/roof-mounted HVAC equipment (y >= levelH - 0.1) so floor plumbing can stack neatly below an attic core
+    if (n.type === 'hvac:equipment' && ny < levelH - 0.1) {
+      crossTradeFloorEquip.push({ x: Number(n.position[0]), z: Number(n.position[2]), minClearM: 1.05 })
+    } else if (n.type === 'electrical:panel') {
+      crossTradeFloorEquip.push({ x: Number(n.position[0]), z: Number(n.position[2]), minClearM: 1.0 })
+    }
+  }
+
+  const floorBeams = obstacles.filter((o) => o.category === 'structural' && o.box.minY < 0.15)
+  const hitsFloorBeam = (cx: number, cz: number): boolean =>
+    floorBeams.some(
+      (b) =>
+        cx >= b.box.minX - 0.35 &&
+        cx <= b.box.maxX + 0.35 &&
+        cz >= b.box.minZ - 0.35 &&
+        cz <= b.box.maxZ + 0.35,
+    )
+  const minClearCrossTrade = (cx: number, cz: number): number => {
+    let best = Infinity
+    for (const eq of crossTradeFloorEquip) {
+      const d = Math.hypot(cx - eq.x, cz - eq.z) - eq.minClearM
+      if (d < best) best = d
+    }
+    for (const f of fixtures) {
+      const d = Math.hypot(cx - f.position[0], cz - f.position[2]) - 0.65
+      if (d < best) best = d
+    }
+    return best
+  }
+
+  const pickWallTuckedMechCorner = (room: RoomPolygon2D | null): [number, number] => {
+    if (!room || room.polygon.length < 3) {
+      return [round2(bounds.minX + 0.55), round2(bounds.minZ + 0.55)]
+    }
+    const inset = 0.42
+    const candidates: Array<readonly [number, number]> = []
+    for (let i = 0; i < room.polygon.length; i++) {
+      const a = room.polygon[i]!
+      const b = room.polygon[(i + 1) % room.polygon.length]!
+      const dxC = room.centroid[0] - a[0]
+      const dzC = room.centroid[1] - a[1]
+      const lenC = Math.hypot(dxC, dzC)
+      if (lenC > inset * 1.1) {
+        candidates.push([round2(a[0] + (dxC / lenC) * inset), round2(a[1] + (dzC / lenC) * inset)])
+      }
+      const mx = (a[0] + b[0]) / 2
+      const mz = (a[1] + b[1]) / 2
+      const dxM = room.centroid[0] - mx
+      const dzM = room.centroid[1] - mz
+      const lenM = Math.hypot(dxM, dzM)
+      if (lenM > inset * 1.1) {
+        candidates.push([round2(mx + (dxM / lenM) * inset), round2(mz + (dzM / lenM) * inset)])
+      }
+    }
+    let best: [number, number] | null = null
+    let bestScore = -Infinity
+    for (const [cx, cz] of candidates) {
+      if (!pointInPolygon2D(cx, cz, room.polygon)) continue
+      if (cx < bounds.minX + 0.2 || cx > bounds.maxX - 0.2 || cz < bounds.minZ + 0.2 || cz > bounds.maxZ - 0.2) continue
+      const beamPenalty = hitsFloorBeam(cx, cz) ? -80 : 40
+      const clear = minClearCrossTrade(cx, cz)
+      const clearScore = clear >= 0 ? 60 + Math.min(1.5, clear) * 10 : clear * 60
+      // Prefer exterior wall corners for short water-entry / condensate / flue runs
+      const extDist = Math.min(
+        Math.abs(cx - bounds.minX),
+        Math.abs(bounds.maxX - cx),
+        Math.abs(cz - bounds.minZ),
+        Math.abs(bounds.maxZ - cz),
       )
-    if (!hitsBeam(x, z)) return [round2(x), round2(z)]
+      const score = beamPenalty + clearScore - extDist * 2.5
+      if (score > bestScore) {
+        bestScore = score
+        best = [cx, cz]
+      }
+    }
+    return best ?? [round2(room.centroid[0]), round2(room.centroid[1])]
+  }
+
+  const nudgeOffStructuralBeams = (x: number, z: number): [number, number] => {
+    if (floorBeams.length === 0) return [round2(x), round2(z)]
+    if (!hitsFloorBeam(x, z)) return [round2(x), round2(z)]
     for (const [dx, dz] of [
       [0, 0.55],
       [0, -0.55],
@@ -586,14 +667,13 @@ export function planPlumbingAutoPopulate(
       if (cx < bounds.minX + 0.12 || cx > bounds.maxX - 0.12 || cz < bounds.minZ + 0.12 || cz > bounds.maxZ - 0.12) {
         continue
       }
-      if (!hitsBeam(cx, cz)) return [cx, cz]
+      if (!hitsFloorBeam(cx, cz)) return [cx, cz]
     }
     return [round2(x), round2(z)]
   }
 
-  let whPos: Vec3 = mechRoom
-    ? [round2(mechRoom.centroid[0]), 0, round2(mechRoom.centroid[1])]
-    : [round2(bounds.minX + 0.75), 0, round2(bounds.minZ + 0.75)]
+  const [cornerWhX, cornerWhZ] = pickWallTuckedMechCorner(mechRoom)
+  let whPos: Vec3 = [cornerWhX, 0, cornerWhZ]
   if (bones?.waterHeaterAnchor) {
     const resolved = resolveBonesAnchorPosition(nodes, bones.waterHeaterAnchor, 0)
     if (resolved) {
@@ -677,12 +757,36 @@ export function planPlumbingAutoPopulate(
     electricalDemand: getEquipmentElectricalDemand(waterHeaterKind, whSizing.electricalLoadWatts),
   })
 
+  const pickInwardDir = (distM: number): readonly [number, number] => {
+    const dirs: ReadonlyArray<readonly [number, number]> = [
+      [1, 0],
+      [-1, 0],
+      [0, 1],
+      [0, -1],
+    ]
+    for (const [dx, dz] of dirs) {
+      const tx = round2(whPos[0] + dx * distM)
+      const tz = round2(whPos[2] + dz * distM)
+      const inBounds =
+        tx >= bounds.minX + 0.15 &&
+        tx <= bounds.maxX - 0.15 &&
+        tz >= bounds.minZ + 0.15 &&
+        tz <= bounds.maxZ - 0.15
+      if (!inBounds) continue
+      if (!mechRoom || pointInPolygon2D(tx, tz, mechRoom.polygon)) {
+        return [dx, dz]
+      }
+    }
+    return [1, 0]
+  }
+  const [mechDirX, mechDirZ] = pickInwardDir(0.68)
+
   const expTankId = nextEqId()
   equipment.push({
     id: expTankId,
     name: `Thermal Expansion Tank (${whSizing.expansionTankGal} gal, IPC 607.3)`,
     equipmentKind: 'expansion-tank',
-    position: [round2(whPos[0] + 0.35), 1.65, round2(whPos[2])],
+    position: [round2(whPos[0] + mechDirX * 0.35), 1.65, round2(whPos[2] + mechDirZ * 0.35)],
     rotation: 0,
     roomName: mechRoom?.name ?? 'Utility',
     capacityGal: whSizing.expansionTankGal,
@@ -690,7 +794,7 @@ export function planPlumbingAutoPopulate(
   })
 
   let manifoldId: string | undefined
-  const manifoldPos: Vec3 = [round2(whPos[0] + 0.65), 1.35, round2(whPos[2])]
+  const manifoldPos: Vec3 = [round2(whPos[0] + mechDirX * 0.65), 1.35, round2(whPos[2] + mechDirZ * 0.65)]
   if (supplyTopology === 'manifold') {
     manifoldId = nextManId()
     const neededPorts = Math.max(12, Math.ceil((fixtures.length * 1.6) / 6) * 6)
@@ -1054,7 +1158,7 @@ export function planPlumbingAutoPopulate(
         routingPlaneY: supplyPlaneY,
         nominalSize: coldSized.size,
         material: supplyMaterial,
-        euclideanInCavity: supplyTopology === 'manifold',
+        euclideanInCavity: false,
         obstacles,
       })
       branchPipeRuns.push({
@@ -1097,7 +1201,7 @@ export function planPlumbingAutoPopulate(
         routingPlaneY: supplyPlaneY + 0.04,
         nominalSize: hotSized.size,
         material: supplyMaterial,
-        euclideanInCavity: supplyTopology === 'manifold',
+        euclideanInCavity: false,
         obstacles,
       })
       const distFromWh = Math.hypot(fix.position[0] - whPos[0], fix.position[2] - whPos[2])
@@ -1199,7 +1303,7 @@ export function planPlumbingAutoPopulate(
       routingPlaneY: supplyPlaneY + 0.08,
       nominalSize: '1/2"',
       material: supplyMaterial,
-      euclideanInCavity: true,
+      euclideanInCavity: false,
       obstacles,
     })
     pipeRuns.push({
