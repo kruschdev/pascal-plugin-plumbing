@@ -77,4 +77,45 @@ describe('Priority #1 @kruschdev/pascal-plugin-structural Interop (Plumbing)', (
     })
     expect(pens.some((p) => p.memberKind === 'top-plate' && p.codeRef.includes('R302.11(5)'))).toBe(true)
   })
+
+  test('R1-BUG-12 & R1-BUG-07: handles string-shorthand wallOverrides, maps shear-wall to isLoadBearing, and subdivides diagonal structural:beam', () => {
+    const nodes: Record<string, SceneNodeLike> = {
+      lvl1: { id: 'lvl1', type: 'level' },
+      str1: {
+        id: 'str1',
+        type: 'structural:assembly',
+        parentId: 'lvl1',
+        studSpacingIn: 24,
+        wallOverrides: {
+          w_shorthand_shear: 'shear-wall',
+          w_shorthand_cmu: 'cmu',
+          w_obj_shear: { construction: 'shear-wall', studSpacingIn: 16 },
+        },
+      },
+      bm_diag: {
+        id: 'bm_diag',
+        type: 'structural:beam',
+        parentId: 'lvl1',
+        start: [0, 0],
+        end: [6, 6],
+        elevationY: 2.5,
+        widthIn: 3.5,
+        depthIn: 11.875,
+        designation: 'Hip Beam',
+      },
+    }
+    const ctx = extractBonesPlumbingContext(nodes, 'lvl1')
+    expect(ctx.wallRules.get('w_shorthand_shear')?.isLoadBearing).toBe(true)
+    expect(ctx.wallRules.get('w_shorthand_cmu')?.construction).toBe('cmu')
+    expect(ctx.wallRules.get('w_obj_shear')?.isLoadBearing).toBe(true)
+    expect(ctx.wallRules.get('w_obj_shear')?.spacingIn).toBe(16)
+
+    const obs = extractPlumbingObstacles(nodes, 'lvl1').filter((o) => o.id.startsWith('bm_diag:seg'))
+    expect(obs.length).toBeGreaterThanOrEqual(4)
+    // Far corner (0, 6) must NOT fall inside any subdivided diagonal beam box
+    const coversFarCorner = obs.some(
+      (o) => 0 >= o.box.minX && 0 <= o.box.maxX && 6 >= o.box.minZ && 6 <= o.box.maxZ,
+    )
+    expect(coversFarCorner).toBe(false)
+  })
 })

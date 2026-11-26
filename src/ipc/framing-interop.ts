@@ -384,6 +384,18 @@ export function extractBonesPlumbingContext(
   const rawOverrides = framingNode?.wallOverrides
   if (rawOverrides && typeof rawOverrides === 'object') {
     for (const [wallId, rawRule] of Object.entries(rawOverrides as Record<string, unknown>)) {
+      if (typeof rawRule === 'string') {
+        const construction: BonesWallConstruction =
+          rawRule === 'lgs' || rawRule === 'cmu' || rawRule === 'skip' ? rawRule : 'framed'
+        wallRules.set(wallId, {
+          construction,
+          spacingIn: defaultSpacingIn,
+          studThicknessM: DRESSED_STUD_THICKNESS_M,
+          isLoadBearing: rawRule === 'shear-wall',
+          isWetWall: false,
+        })
+        continue
+      }
       if (!rawRule || typeof rawRule !== 'object') continue
       const r = rawRule as Record<string, unknown>
       const construction: BonesWallConstruction =
@@ -392,12 +404,18 @@ export function extractBonesPlumbingContext(
           : 'framed'
       const rawSpacing = r.studSpacingIn ?? r.spacingIn
       const spacingIn: 12 | 16 | 24 =
-        rawSpacing === 12 ? 12 : rawSpacing === 24 ? 24 : defaultSpacingIn
+        rawSpacing === 12
+          ? 12
+          : rawSpacing === 16
+            ? 16
+            : rawSpacing === 24
+              ? 24
+              : defaultSpacingIn
       wallRules.set(wallId, {
         construction,
         spacingIn,
         studThicknessM: DRESSED_STUD_THICKNESS_M,
-        isLoadBearing: Boolean(r.isLoadBearing),
+        isLoadBearing: Boolean(r.isLoadBearing || r.isShearWall || r.construction === 'shear-wall'),
         isWetWall: Boolean(r.isWetWall),
       })
     }

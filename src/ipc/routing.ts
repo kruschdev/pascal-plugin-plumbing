@@ -346,19 +346,47 @@ export function extractPlumbingObstacles(
       const w = (typeof n.widthIn === 'number' ? n.widthIn : 3.5) * INCHES_TO_METERS
       const h = (typeof n.depthIn === 'number' ? n.depthIn : 11.875) * INCHES_TO_METERS
       const y = typeof n.elevationY === 'number' ? Number(n.elevationY) : levelH - h / 2
-      obstacles.push({
-        id: n.id,
-        category: 'structural',
-        label: `Structural beam ${String(n.designation ?? n.beamType ?? '')} (${n.name ?? n.id})`.trim(),
-        box: {
-          minX: Math.min(sx, ex) - w / 2,
-          maxX: Math.max(sx, ex) + w / 2,
-          minY: y - h / 2,
-          maxY: y + h / 2,
-          minZ: Math.min(sz, ez) - w / 2,
-          maxZ: Math.max(sz, ez) + w / 2,
-        },
-      })
+      const label = `Structural beam ${String(n.designation ?? n.beamType ?? '')} (${n.name ?? n.id})`.trim()
+      const isDiagonal = Math.abs(ex - sx) > 0.2 && Math.abs(ez - sz) > 0.2
+      if (isDiagonal) {
+        const len = Math.hypot(ex - sx, ez - sz)
+        const steps = Math.max(2, Math.min(24, Math.ceil(len / 0.6)))
+        for (let i = 0; i < steps; i++) {
+          const t0 = i / steps
+          const t1 = (i + 1) / steps
+          const x0 = sx + (ex - sx) * t0
+          const z0 = sz + (ez - sz) * t0
+          const x1 = sx + (ex - sx) * t1
+          const z1 = sz + (ez - sz) * t1
+          obstacles.push({
+            id: `${n.id}:seg${i}`,
+            category: 'structural',
+            label,
+            box: {
+              minX: Math.min(x0, x1) - w / 2,
+              maxX: Math.max(x0, x1) + w / 2,
+              minY: y - h / 2,
+              maxY: y + h / 2,
+              minZ: Math.min(z0, z1) - w / 2,
+              maxZ: Math.max(z0, z1) + w / 2,
+            },
+          })
+        }
+      } else {
+        obstacles.push({
+          id: n.id,
+          category: 'structural',
+          label,
+          box: {
+            minX: Math.min(sx, ex) - w / 2,
+            maxX: Math.max(sx, ex) + w / 2,
+            minY: y - h / 2,
+            maxY: y + h / 2,
+            minZ: Math.min(sz, ez) - w / 2,
+            maxZ: Math.max(sz, ez) + w / 2,
+          },
+        })
+      }
     } else if (n.type === 'column' && pos) {
       const w = typeof n.width === 'number' ? n.width : 0.25
       const d = typeof n.depth === 'number' ? n.depth : 0.25
