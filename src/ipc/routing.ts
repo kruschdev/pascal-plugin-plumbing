@@ -289,6 +289,9 @@ export function extractWallOpenings(
     if (!hostWallId) continue
     const wall = wallById.get(hostWallId)!
     if (wall.lengthM < 0.3) continue
+    const isWallChild =
+      (typeof n.parentId === 'string' && n.parentId === wall.id) ||
+      childWallLookup.get(n.id) === wall.id
 
     const asset = n.asset as Record<string, unknown> | undefined
     const dims = Array.isArray(asset?.dimensions) ? (asset.dimensions as number[]) : undefined
@@ -323,7 +326,7 @@ export function extractWallOpenings(
     if (pos && typeof pos[0] === 'number' && Number.isFinite(pos[0])) {
       const px = pos[0]
       const pz = typeof pos[2] === 'number' && Number.isFinite(pos[2]) ? pos[2] : 0
-      if (Math.abs(pz) < 0.45 && px >= -0.25 && px <= wall.lengthM + 0.25) {
+      if (isWallChild && Math.abs(pz) < 0.45 && px >= -0.25 && px <= wall.lengthM + 0.25) {
         uCenterM = px
         if (n.type === 'item' && assetOffset) {
           const ox = typeof assetOffset[0] === 'number' && Number.isFinite(assetOffset[0]) ? assetOffset[0] : 0
@@ -385,18 +388,27 @@ export function classifyRoomName(
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[\u2018\u2019`]/g, "'")
+  if (
+    /\bpool\b|swimming|piscine|porch|patio|deck|balcony|yard|lanai|courtyard|garden|driveway|exterior|\bbalcon\b|\bterrasse\b|\bterrace\b|\bterraza\b|\bspawn\b/.test(
+      s,
+    )
+  ) {
+    return 'exterior'
+  }
   if (/commercial.*restroom|mens|womens|public.*(bath|restroom)/.test(s)) return 'commercial-restroom'
   if (/restroom/.test(s)) return occupancy === 'commercial' ? 'commercial-restroom' : 'bathroom'
   if (/commercial.*kitchen|prep.*kitchen|scullery/.test(s)) return 'commercial-kitchen'
   if (/master.*bath|primary.*bath|ensuite|en-suite/.test(s)) return 'master-bath'
-  if (/half.*bath|powder|\bwc\d*\b|\btoilettes?\b|\baseo\b/.test(s)) return 'half-bath'
+  if (/half.*bath|powder/.test(s)) return 'half-bath'
   if (
-    /bath|toilet|shower|salle\s+de\s+bains?|salle\s+d'eau|salle\s+de\s+douche|\bbad\b|badezimmer|\bbano\b|cuarto\s+de\s+bano|\bbagno\b/.test(
+    /bath|shower|salle\s+de\s+bains?|salle\s+d'eau|salle\s+de\s+douche|\bbad\b|badezimmer|\bbano\b|cuarto\s+de\s+bano|\bbagno\b/.test(
       s,
     )
   ) {
     return 'bathroom'
   }
+  if (/\bwc\d*\b|\btoilettes?\b|\baseo\b/.test(s)) return 'half-bath'
+  if (/toilet/.test(s)) return 'bathroom'
   if (/kitchen|pantry|cuisine|cocina|cucina|\bkuche\b|\bkueche\b/.test(s)) return 'kitchen'
   if (/laundry|mudroom|washer|buanderie|waschkuche|waschkueche|lavanderia|hauswirtschaftsraum/.test(s)) {
     return 'laundry'
@@ -405,7 +417,6 @@ export function classifyRoomName(
   if (/garage|carport/.test(s)) return 'garage'
   if (/bed|nursery|guest|\bchambre\b|schlafzimmer|dormitorio/.test(s)) return 'bedroom'
   if (/living|great|family|dining|office|den|hall|\bsalon\b|\bsejour\b|wohnzimmer|\bbureau\b/.test(s)) return 'living'
-  if (/porch|patio|deck|balcony|yard|exterior|\bbalcon\b|\bterrasse\b|\bterraza\b/.test(s)) return 'exterior'
   return 'other'
 }
 
@@ -485,9 +496,64 @@ export function resolveLevelHeightM(
   nodes: Readonly<Record<string, SceneNodeLike>>,
   levelId: string | null = null,
 ): number {
+  const levelNode =
+    levelId && nodes[levelId]?.type === 'level'
+      ? nodes[levelId]
+      : levelId === null
+        ? Object.values(nodes).find(
+            (n) => n.type === 'level' && typeof n.height === 'number' && Number.isFinite(n.height) && n.height > 1.5,
+          )
+        : undefined
+  if (
+    levelNode &&
+    typeof levelNode.height === 'number' &&
+    Number.isFinite(levelNode.height) &&
+    levelNode.height > 1.5
+  ) {
+    return levelNode.height
+  }
   const walls = extractWallSegments(nodes, levelId)
-  if (walls.length === 0) return 2.6
-  return Math.max(2.2, walls.reduce((s, w) => s + w.heightM, 0) / walls.length)
+  const rawHeights = walls
+    .map((w) => {
+      const raw = nodes[w.id]
+      return typeof raw?.height === 'number' && Number.isFinite(raw.height) && raw.height > 1.5 ? raw.height : null
+    })
+    .filter((h): h is number => h !== null)
+  if (rawHeights.length > 0) {
+    return Math.max(2.2, ...rawHeights)
+  }
+  if (walls.length > 0) {
+    return Math.max(2.2, ...walls.map((w) => w.heightM))
+  }
+  return 2.6
+}
+
+export type BuildingBounds2D = {
+  minX: number
+  maxX: number
+  minZ: number
+  maxZ: number
+}
+
+/**
+ * Estimate pitched gable roof soffit/ridge elevation at `(x, z)` over the walled building footprint.
+ */
+export function estimateGableRoofYAt(
+  x: number,
+  z: number,
+  bounds: BuildingBounds2D,
+  wallH: number,
+  pitchRiseOver12 = 6,
+): number {
+  const spanX = bounds.maxX - bounds.minX
+  const spanZ = bounds.maxZ - bounds.minZ
+  if (spanX <= 0.1 || spanZ <= 0.1) return wallH
+  const ridgeAlongX = spanX >= spanZ
+  const halfSpan = (ridgeAlongX ? spanZ : spanX) / 2
+  const center = ridgeAlongX ? (bounds.minZ + bounds.maxZ) / 2 : (bounds.minX + bounds.maxX) / 2
+  const distFromRidge = Math.abs((ridgeAlongX ? z : x) - center)
+  const riseM = Math.max(0, halfSpan - distFromRidge) * (pitchRiseOver12 / 12)
+  return wallH + riseM
 }
 
 /**
@@ -814,21 +880,22 @@ function isElevatedBeamObstacle(o: PlumbingObstacle): boolean {
 
 /**
  * Given a vertical riser/drop at `(x, z)` that collides with one or more obstacles,
- * generate candidate lateral `(x', z')` jog positions just outside the colliding AABBs.
+ * generate up to `maxCandidates` (default 8) closest lateral `(x', z')` jog positions just outside the colliding AABBs.
  */
 function buildLateralEscapeCandidates(
   x: number,
   z: number,
   hits: ReadonlyArray<PlumbingObstacle>,
   clearPad: number,
+  maxCandidates = 8,
 ): Array<readonly [number, number]> {
-  const out: Array<readonly [number, number]> = []
+  const candidates: Array<readonly [number, number, number]> = []
   const seen = new Set<string>()
   const add = (cx: number, cz: number) => {
     const k = `${Math.round(cx * 100)},${Math.round(cz * 100)}`
     if (seen.has(k)) return
     seen.add(k)
-    out.push([cx, cz])
+    candidates.push([cx, cz, Math.hypot(cx - x, cz - z)])
   }
   for (const obs of hits) {
     // Try shortest escapes along X and Z past the obstacle's jambs / faces
@@ -836,21 +903,66 @@ function buildLateralEscapeCandidates(
     const rightX = obs.box.maxX + clearPad
     const backZ = obs.box.minZ - clearPad
     const frontZ = obs.box.maxZ + clearPad
-    const ordered: Array<readonly [number, number, number]> = [
-      [leftX, z, Math.abs(leftX - x)],
-      [rightX, z, Math.abs(rightX - x)],
-      [x, backZ, Math.abs(backZ - z)],
-      [x, frontZ, Math.abs(frontZ - z)],
-    ]
-    ordered.sort((a, b) => a[2] - b[2])
-    for (const [cx, cz] of ordered) add(cx, cz)
+    add(leftX, z)
+    add(rightX, z)
+    add(x, backZ)
+    add(x, frontZ)
     // Also try diagonal corners in case two beams meet at a corner/post
     add(leftX, backZ)
     add(leftX, frontZ)
     add(rightX, backZ)
     add(rightX, frontZ)
   }
-  return out
+  candidates.sort((a, b) => a[2] - b[2])
+  return candidates.slice(0, maxCandidates).map(([cx, cz]) => [cx, cz] as const)
+}
+
+function resolveAllowedEnvelope(
+  buildingBounds: BuildingBounds2D | undefined,
+  from: Vec3,
+  toXZ: readonly [number, number],
+  margin = 0.08,
+): BuildingBounds2D | null {
+  if (!buildingBounds) return null
+  const innerMinX = buildingBounds.minX + margin
+  const innerMaxX = buildingBounds.maxX - margin
+  const innerMinZ = buildingBounds.minZ + margin
+  const innerMaxZ = buildingBounds.maxZ - margin
+  return {
+    minX: Math.min(innerMinX <= innerMaxX ? innerMinX : buildingBounds.minX, from[0], toXZ[0]),
+    maxX: Math.max(innerMinX <= innerMaxX ? innerMaxX : buildingBounds.maxX, from[0], toXZ[0]),
+    minZ: Math.min(innerMinZ <= innerMaxZ ? innerMinZ : buildingBounds.minZ, from[2], toXZ[1]),
+    maxZ: Math.max(innerMinZ <= innerMaxZ ? innerMaxZ : buildingBounds.maxZ, from[2], toXZ[1]),
+  }
+}
+
+function exceedsEnvelopeXZ(path: ReadonlyArray<Vec3>, env: BuildingBounds2D | null): boolean {
+  if (!env) return false
+  for (const p of path) {
+    if (p[0] < env.minX - 1e-4 || p[0] > env.maxX + 1e-4 || p[2] < env.minZ - 1e-4 || p[2] > env.maxZ + 1e-4) {
+      return true
+    }
+  }
+  return false
+}
+
+function exceedsRoofPlane(
+  path: ReadonlyArray<Vec3>,
+  pipeRadiusM: number,
+  maxRoofYAt?: (x: number, z: number) => number,
+): boolean {
+  if (!maxRoofYAt) return false
+  for (let i = 1; i < path.length; i++) {
+    const a = path[i - 1]!
+    const b = path[i]!
+    for (const f of [0, 0.25, 0.5, 0.75, 1]) {
+      const px = a[0] + (b[0] - a[0]) * f
+      const py = a[1] + (b[1] - a[1]) * f
+      const pz = a[2] + (b[2] - a[2]) * f
+      if (py + pipeRadiusM > maxRoofYAt(px, pz) - 0.08 + 1e-4) return true
+    }
+  }
+  return false
 }
 
 /**
@@ -898,6 +1010,7 @@ export function routeDwvDrainRun(params: {
   foundationType?: FoundationType
   slopeInPerFt?: 0.125 | 0.25
   obstacles?: ReadonlyArray<PlumbingObstacle>
+  buildingBounds?: BuildingBounds2D
 }): {
   path: Vec3[]
   slopeInPerFt: number
@@ -905,7 +1018,15 @@ export function routeDwvDrainRun(params: {
   detoured: boolean
   clashes: PlumbingObstacle[]
 } {
-  const { from, to, nominalSize, material = 'pvc-dwv', foundationType = 'crawlspace', obstacles = [] } = params
+  const {
+    from,
+    to,
+    nominalSize,
+    material = 'pvc-dwv',
+    foundationType = 'crawlspace',
+    obstacles = [],
+    buildingBounds,
+  } = params
   const minSlope = getMinRequiredDrainSlopeInPerFt(nominalSize)
   const slopeInPerFt = Math.max(params.slopeInPerFt ?? 0.25, minSlope)
   const slopeRatio = slopeInPerFt / 12 // vertical drop per horizontal unit
@@ -913,6 +1034,7 @@ export function routeDwvDrainRun(params: {
   const underFloorY = foundationType === 'slab' ? -0.35 : -0.24
   const startY = Math.min(from[1], underFloorY)
   const pipeRadiusM = (params.pipeRadiusM ?? getPipeOuterDiameterM(nominalSize, material) / 2) + 0.015
+  const env = resolveAllowedEnvelope(buildingBounds, from, [to[0], to[2]])
 
   const buildSlopedCandidate = (
     horizWaypoints: ReadonlyArray<readonly [number, number]>,
@@ -960,10 +1082,11 @@ export function routeDwvDrainRun(params: {
   ])
   let bestPath = primary
   let bestClashes = detectPlumbingClashes(primary, obstacles, pipeRadiusM)
+  let bestBoundsViolation = exceedsEnvelopeXZ(primary, env)
   let detoured = false
   let underBeamY: number | null = null
 
-  if (bestClashes.length > 0) {
+  if (bestClashes.length > 0 || bestBoundsViolation) {
     // Compute safe elevation below colliding (and deepest level) under-floor girders
     const allUnderBeams = obstacles.filter(isUnderFloorBeamObstacle)
     const structuralHits = bestClashes.filter(isUnderFloorBeamObstacle)
@@ -978,13 +1101,19 @@ export function routeDwvDrainRun(params: {
       allLowestMinY !== null ? Math.min(startY - 0.18, allLowestMinY - pipeRadiusM - 0.06) : null
 
     const tryCandidate = (cand: Vec3[]): boolean => {
+      const boundsViol = exceedsEnvelopeXZ(cand, env)
+      if (boundsViol && !bestBoundsViolation) return false
       const c = detectPlumbingClashes(cand, obstacles, pipeRadiusM)
-      if (c.length < bestClashes.length) {
+      const better =
+        (bestBoundsViolation && !boundsViol) ||
+        (boundsViol === bestBoundsViolation && c.length < bestClashes.length)
+      if (better) {
         bestPath = cand
         bestClashes = c
+        bestBoundsViolation = boundsViol
         detoured = true
       }
-      return bestClashes.length === 0
+      return bestClashes.length === 0 && !bestBoundsViolation
     }
 
     if (underBeamY !== null) {
@@ -995,11 +1124,11 @@ export function routeDwvDrainRun(params: {
         ]) {
           if (tryCandidate(buildSlopedCandidate(wp, sy))) break
         }
-        if (bestClashes.length === 0) break
+        if (bestClashes.length === 0 && !bestBoundsViolation) break
       }
     }
 
-    if (bestClashes.length > 0) {
+    if (bestClashes.length > 0 || bestBoundsViolation) {
       const midX = (from[0] + to[0]) / 2
       const midZ = (from[2] + to[2]) / 2
       const edgePad = pipeRadiusM + 0.08
@@ -1010,7 +1139,8 @@ export function routeDwvDrainRun(params: {
       )
 
       // Check if the vertical drop from `from` directly collides with an under-floor girder or column
-      const dropProbeY = startYs[0] ?? startY
+      // Probe to the deepest candidate startY so deeper beams below underBeamY are never missed.
+      const dropProbeY = startYs.length > 0 ? Math.min(...startYs) : startY
       const dropHits =
         from[1] > dropProbeY + 0.02
           ? detectPlumbingClashes([from, [from[0], dropProbeY, from[2]]], obstacles, pipeRadiusM)
@@ -1051,9 +1181,9 @@ export function routeDwvDrainRun(params: {
           for (const wp of wpList) {
             if (tryCandidate(buildSlopedCandidate(wp, sy, jog))) break
           }
-          if (bestClashes.length === 0) break
+          if (bestClashes.length === 0 && !bestBoundsViolation) break
         }
-        if (bestClashes.length === 0) break
+        if (bestClashes.length === 0 && !bestBoundsViolation) break
       }
     }
   }
@@ -1070,7 +1200,7 @@ export function routeDwvDrainRun(params: {
 /**
  * Route a dry re-vent from a fixture wet wall up to >= 6" above flood-level rim (IPC 905.5)
  * and horizontally over to the main vent stack, detouring around structural headers, beams,
- * columns, and NEC 110.26(E) obstacles.
+ * columns, and NEC 110.26(E) obstacles while keeping strictly non-descending elevation (IPC 905.2).
  */
 export function routeVentRun(params: {
   from: Vec3
@@ -1081,6 +1211,8 @@ export function routeVentRun(params: {
   material?: PipeMaterial
   pipeRadiusM?: number
   obstacles?: ReadonlyArray<PlumbingObstacle>
+  buildingBounds?: BuildingBounds2D
+  maxRoofYAt?: (x: number, z: number) => number
 }): {
   path: Vec3[]
   tieInHeightM: number
@@ -1096,25 +1228,37 @@ export function routeVentRun(params: {
     nominalSize,
     material = 'pvc-dwv',
     obstacles = [],
+    buildingBounds,
+    maxRoofYAt,
   } = params
   const pipeRadiusM =
     params.pipeRadiusM ?? (nominalSize ? getPipeOuterDiameterM(nominalSize, material) / 2 : 0.03)
+  const env = resolveAllowedEnvelope(buildingBounds, from, stackPoint)
   // IPC 905.5: horizontal vent tie-in MUST be >= 6" (0.1524 m) above flood-level rim; route in upper wall/attic
   const minHorizontalVentY = floodRimHeightM + 6 * INCHES_TO_METERS + 0.04
   const minTieInY = floodRimHeightM + 6 * INCHES_TO_METERS + 0.1
-  const tieInHeightM = Math.max(minTieInY, ceilingHeightM - 0.15)
+  const rawTieInHeightM = Math.max(minTieInY, ceilingHeightM - 0.15)
+  const minEndpointRoofCap = maxRoofYAt
+    ? Math.min(maxRoofYAt(from[0], from[2]), maxRoofYAt(stackPoint[0], stackPoint[1])) - pipeRadiusM - 0.09
+    : Infinity
+  const tieInHeightM =
+    Number.isFinite(minEndpointRoofCap) && minEndpointRoofCap >= minHorizontalVentY
+      ? Math.min(rawTieInHeightM, minEndpointRoofCap)
+      : rawTieInHeightM
 
   const buildVentCandidate = (
     waypoints: ReadonlyArray<readonly [number, number]>,
     tieY = tieInHeightM,
     riserJog?: { x: number; z: number; jogY: number },
   ): Vec3[] => {
+    // Clamp jog elevation to tieY so dry vents never form an inverted-U condensate trap (IPC 905.2)
+    const jy = riserJog ? Math.min(riserJog.jogY, tieY) : tieY
     const pts: Vec3[] = riserJog
       ? [
           from,
-          [from[0], riserJog.jogY, from[2]],
-          [riserJog.x, riserJog.jogY, riserJog.z],
-          [riserJog.x, tieY, riserJog.z],
+          [from[0], jy, from[2]],
+          [riserJog.x, jy, riserJog.z],
+          ...(tieY > jy + 0.008 ? [[riserJog.x, tieY, riserJog.z] as Vec3] : []),
         ]
       : [from, [from[0], tieY, from[2]]]
     for (const [wx, wz] of waypoints) {
@@ -1129,10 +1273,12 @@ export function routeVentRun(params: {
   ])
   let bestPath = primary
   let bestClashes = detectPlumbingClashes(primary, obstacles, pipeRadiusM)
+  let bestBoundsViolation = exceedsEnvelopeXZ(primary, env)
+  let bestRoofViolation = exceedsRoofPlane(primary, pipeRadiusM, maxRoofYAt)
   let bestTieInY = tieInHeightM
   let detoured = false
 
-  if (bestClashes.length > 0) {
+  if (bestClashes.length > 0 || bestBoundsViolation || bestRoofViolation) {
     const edgePad = pipeRadiusM + 0.07
     const maxAtticTieY = ceilingHeightM + 0.36
     const elevatedHits = bestClashes.filter(isElevatedBeamObstacle)
@@ -1140,7 +1286,7 @@ export function routeVentRun(params: {
 
     // Candidate attic/upper-wall tie-in elevations:
     // 1. Default tieInHeightM
-    // 2. Hop cleanly ABOVE wall headers into ceiling/attic space (while remaining below stack roof exit)
+    // 2. Hop cleanly ABOVE wall headers into ceiling/attic space (while remaining strictly under pitched roof)
     // 3. Duck cleanly BELOW a high ceiling/ridge beam when still >= 6" above fixture flood rim (IPC 905.5)
     const tieYs: number[] = [tieInHeightM]
     const pushTieY = (y: number) => {
@@ -1159,8 +1305,12 @@ export function routeVentRun(params: {
     if (headerBeams.length > 0) {
       pushTieY(Math.max(...headerBeams.map((o) => o.box.maxY)) + pipeRadiusM + 0.05)
     }
+    pushTieY(ceilingHeightM - 0.15)
     pushTieY(ceilingHeightM + 0.14)
     pushTieY(ceilingHeightM + 0.28)
+    if (Number.isFinite(minEndpointRoofCap)) {
+      pushTieY(minEndpointRoofCap)
+    }
 
     // Check if the vertical riser at `from` hits a window/door header or beam directly above the fixture.
     // If so, offset horizontally past the header jamb at `jogY >= floodRim + 6"` (IPC 905.5) before rising!
@@ -1187,14 +1337,24 @@ export function routeVentRun(params: {
     }
 
     const tryVent = (cand: Vec3[], tieY: number): boolean => {
+      const boundsViol = exceedsEnvelopeXZ(cand, env)
+      const roofViol = exceedsRoofPlane(cand, pipeRadiusM, maxRoofYAt)
+      if (boundsViol && !bestBoundsViolation) return false
+      if (roofViol && !bestRoofViolation && boundsViol === bestBoundsViolation) return false
       const c = detectPlumbingClashes(cand, obstacles, pipeRadiusM)
-      if (c.length < bestClashes.length) {
+      const better =
+        (bestBoundsViolation && !boundsViol) ||
+        (boundsViol === bestBoundsViolation && bestRoofViolation && !roofViol) ||
+        (boundsViol === bestBoundsViolation && roofViol === bestRoofViolation && c.length < bestClashes.length)
+      if (better) {
         bestPath = cand
         bestClashes = c
+        bestBoundsViolation = boundsViol
+        bestRoofViolation = roofViol
         bestTieInY = tieY
         detoured = true
       }
-      return bestClashes.length === 0
+      return bestClashes.length === 0 && !bestBoundsViolation && !bestRoofViolation
     }
 
     for (const jog of riserJogs) {
@@ -1215,9 +1375,9 @@ export function routeVentRun(params: {
         for (const wp of candidates) {
           if (tryVent(buildVentCandidate(wp, tieY, jog), tieY)) break
         }
-        if (bestClashes.length === 0) break
+        if (bestClashes.length === 0 && !bestBoundsViolation && !bestRoofViolation) break
       }
-      if (bestClashes.length === 0) break
+      if (bestClashes.length === 0 && !bestBoundsViolation && !bestRoofViolation) break
     }
   }
 
@@ -1233,7 +1393,7 @@ export function routeVentRun(params: {
 /**
  * Route a pressurized supply (Cold / Hot / Recirc) or Fuel Gas run:
  * - Drops vertically inside wall cavities to under-floor crawlspace/basement or attic plane
- * - Automatically detours below floor girders, around headers/beams, and clear of NEC 110.26(E)
+ * - Automatically detours below floor girders, over door/window headers, and clear of NEC 110.26(E)
  *   electrical-panel keep-out zones & structural columns (including vertical riser/drop jogs).
  */
 export function routePressurizedPipeRun(params: {
@@ -1245,6 +1405,8 @@ export function routePressurizedPipeRun(params: {
   pipeRadiusM?: number
   euclideanInCavity?: boolean
   obstacles?: ReadonlyArray<PlumbingObstacle>
+  buildingBounds?: BuildingBounds2D
+  maxRoofYAt?: (x: number, z: number) => number
 }): {
   path: Vec3[]
   lengthFt: number
@@ -1259,9 +1421,12 @@ export function routePressurizedPipeRun(params: {
     material = 'pex-a',
     euclideanInCavity = true,
     obstacles = [],
+    buildingBounds,
+    maxRoofYAt,
   } = params
   const pipeRadiusM =
     params.pipeRadiusM ?? (nominalSize ? getPipeOuterDiameterM(nominalSize, material) / 2 : 0.02)
+  const env = resolveAllowedEnvelope(buildingBounds, from, [to[0], to[2]])
 
   const buildCandidate = (
     elbowFirst: 'x' | 'z' | 'diag',
@@ -1303,13 +1468,18 @@ export function routePressurizedPipeRun(params: {
   const primary = buildCandidate(euclideanInCavity ? 'diag' : 'x', 0)
   let bestPath = primary
   let bestClashes = detectPlumbingClashes(primary, obstacles, pipeRadiusM)
+  let bestBoundsViolation = exceedsEnvelopeXZ(primary, env)
+  let bestRoofViolation = exceedsRoofPlane(primary, pipeRadiusM, maxRoofYAt)
   let detoured = false
 
-  if (bestClashes.length > 0) {
+  if (bestClashes.length > 0 || bestBoundsViolation || bestRoofViolation) {
     const edgePad = pipeRadiusM + 0.07
     const allUnderBeams = obstacles.filter(isUnderFloorBeamObstacle)
     const structuralHits = bestClashes.filter(isUnderFloorBeamObstacle)
     const elevatedHits = bestClashes.filter(isElevatedBeamObstacle)
+    const allElevatedAreHeaders =
+      elevatedHits.length > 0 &&
+      elevatedHits.every((o) => o.beamRole === 'header' || /header/i.test(o.label))
 
     const planeYs: number[] = []
     const pushPlaneY = (y: number) => {
@@ -1327,35 +1497,124 @@ export function routePressurizedPipeRun(params: {
       )
     }
     if (elevatedHits.length > 0) {
-      pushPlaneY(Math.min(...elevatedHits.map((o) => o.box.minY)) - pipeRadiusM - 0.06)
-      pushPlaneY(Math.max(...elevatedHits.map((o) => o.box.maxY)) + pipeRadiusM + 0.06)
+      const aboveHit = Math.max(...elevatedHits.map((o) => o.box.maxY)) + pipeRadiusM + 0.06
+      const belowHit = Math.min(...elevatedHits.map((o) => o.box.minY)) - pipeRadiusM - 0.06
+      // Always try routing OVER door/window headers first; suppress belowHit on overhead runs (> 1.8m)
+      // so supply pipes never drop horizontally across open doorways or window glass.
+      pushPlaneY(aboveHit)
+      if (!(allElevatedAreHeaders && routingPlaneY > 1.8)) {
+        pushPlaneY(belowHit)
+      }
     }
     pushPlaneY(routingPlaneY)
-    pushPlaneY(routingPlaneY - 0.28)
-
-    const tryPressurized = (cand: Vec3[]): boolean => {
-      const c = detectPlumbingClashes(cand, obstacles, pipeRadiusM)
-      if (c.length < bestClashes.length) {
-        bestPath = cand
-        bestClashes = c
-        detoured = true
+    if (!(allElevatedAreHeaders && routingPlaneY > 1.8)) {
+      pushPlaneY(routingPlaneY - 0.28)
+    }
+    if (maxRoofYAt && bestRoofViolation) {
+      const roofSafeY =
+        Math.min(maxRoofYAt(from[0], from[2]), maxRoofYAt(to[0], to[2])) - pipeRadiusM - 0.09
+      if (roofSafeY < routingPlaneY && !(allElevatedAreHeaders && roofSafeY < Math.min(...elevatedHits.map((o) => o.box.minY)))) {
+        pushPlaneY(roofSafeY)
       }
-      return bestClashes.length === 0
     }
 
-    // Detect if the vertical drop at `from` or vertical rise at `to` passes through a girder/header/column
-    const probeY = planeYs[0] ?? routingPlaneY
-    const fromDropHits = detectPlumbingClashes([from, [from[0], probeY, from[2]]], obstacles, pipeRadiusM)
-    const toRiseHits = detectPlumbingClashes([[to[0], probeY, to[2]], to], obstacles, pipeRadiusM)
+    const maxEval = 300
+    let evalCount = 0
+    const tryPressurized = (cand: Vec3[]): boolean => {
+      if (evalCount >= maxEval) return true
+      evalCount += 1
+      const boundsViol = exceedsEnvelopeXZ(cand, env)
+      const roofViol = exceedsRoofPlane(cand, pipeRadiusM, maxRoofYAt)
+      if (boundsViol && !bestBoundsViolation) return evalCount >= maxEval
+      if (roofViol && !bestRoofViolation && boundsViol === bestBoundsViolation) return evalCount >= maxEval
+      const c = detectPlumbingClashes(cand, obstacles, pipeRadiusM)
+      const better =
+        (bestBoundsViolation && !boundsViol) ||
+        (boundsViol === bestBoundsViolation && bestRoofViolation && !roofViol) ||
+        (boundsViol === bestBoundsViolation && roofViol === bestRoofViolation && c.length < bestClashes.length)
+      if (better) {
+        bestPath = cand
+        bestClashes = c
+        bestBoundsViolation = boundsViol
+        bestRoofViolation = roofViol
+        detoured = true
+      }
+      return (bestClashes.length === 0 && !bestBoundsViolation && !bestRoofViolation) || evalCount >= maxEval
+    }
 
-    const fromJogs: Array<readonly [number, number] | undefined> = [
-      undefined,
-      ...(fromDropHits.length > 0 ? buildLateralEscapeCandidates(from[0], from[2], fromDropHits, edgePad) : []),
+    // Probe the FULL vertical riser/drop envelope [minPlaneY, maxPlaneY] so headers/girders
+    // sitting anywhere between endpoint elevation and any candidate routing plane are caught.
+    const minPlaneY = Math.min(...planeYs)
+    const maxPlaneY = Math.max(...planeYs)
+    const fromDropHits = detectPlumbingClashes(
+      [
+        [from[0], Math.min(from[1], minPlaneY), from[2]],
+        [from[0], Math.max(from[1], maxPlaneY), from[2]],
+      ],
+      obstacles,
+      pipeRadiusM,
+    )
+    const toRiseHits = detectPlumbingClashes(
+      [
+        [to[0], Math.min(to[1], minPlaneY), to[2]],
+        [to[0], Math.max(to[1], maxPlaneY), to[2]],
+      ],
+      obstacles,
+      pipeRadiusM,
+    )
+
+    const prefilterJogs = (
+      anchor: Vec3,
+      rawEscapes: ReadonlyArray<readonly [number, number]>,
+      limit = 4,
+    ): Array<readonly [number, number] | undefined> => {
+      if (rawEscapes.length === 0) return [undefined]
+      const yLo = Math.min(anchor[1], minPlaneY)
+      const yHi = Math.max(anchor[1], maxPlaneY)
+      const scored = rawEscapes
+        .filter(([jx, jz]) => !env || (jx >= env.minX - 1e-4 && jx <= env.maxX + 1e-4 && jz >= env.minZ - 1e-4 && jz <= env.maxZ + 1e-4))
+        .map((jog) => {
+          const leg: Vec3[] = [
+            anchor,
+            [jog[0], anchor[1], jog[1]],
+            [jog[0], yLo, jog[1]],
+            [jog[0], yHi, jog[1]],
+          ]
+          const clashCount = detectPlumbingClashes(leg, obstacles, pipeRadiusM).length
+          const dist = Math.hypot(jog[0] - anchor[0], jog[1] - anchor[2])
+          return { jog, clashCount, dist }
+        })
+      scored.sort((a, b) => a.clashCount - b.clashCount || a.dist - b.dist)
+      return [undefined, ...scored.slice(0, limit).map((s) => s.jog)]
+    }
+
+    const fromJogs = prefilterJogs(
+      from,
+      fromDropHits.length > 0 ? buildLateralEscapeCandidates(from[0], from[2], fromDropHits, edgePad) : [],
+    )
+    const toJogs = prefilterJogs(
+      to,
+      toRiseHits.length > 0 ? buildLateralEscapeCandidates(to[0], to[2], toRiseHits, edgePad) : [],
+    )
+
+    const modes: ReadonlyArray<readonly ['x' | 'z' | 'diag', number]> = [
+      [euclideanInCavity ? 'diag' : 'x', 0],
+      ['x', 0],
+      ['z', 0],
+      ['x', 0.55],
+      ['x', -0.55],
+      ['z', 0.55],
+      ['z', -0.55],
+      ['diag', 0.75],
+      ['diag', -0.75],
+      ['x', 1.15],
+      ['x', -1.15],
+      ['z', 1.15],
+      ['z', -1.15],
     ]
-    const toJogs: Array<readonly [number, number] | undefined> = [
-      undefined,
-      ...(toRiseHits.length > 0 ? buildLateralEscapeCandidates(to[0], to[2], toRiseHits, edgePad) : []),
-    ]
+
+    const isDone = () =>
+      (bestClashes.length === 0 && !bestBoundsViolation && !bestRoofViolation) || evalCount >= maxEval
 
     for (const fJog of fromJogs) {
       for (const tJog of toJogs) {
@@ -1366,33 +1625,18 @@ export function routePressurizedPipeRun(params: {
         const dynMids = buildObstacleDetourWaypoints([fx, fz], [tx, tz], bestClashes, edgePad)
 
         for (const py of planeYs) {
-          const modes: Array<readonly ['x' | 'z' | 'diag', number]> = [
-            [euclideanInCavity ? 'diag' : 'x', 0],
-            ['x', 0],
-            ['z', 0],
-            ['x', 0.55],
-            ['x', -0.55],
-            ['z', 0.55],
-            ['z', -0.55],
-            ['diag', 0.75],
-            ['diag', -0.75],
-            ['x', 1.15],
-            ['x', -1.15],
-            ['z', 1.15],
-            ['z', -1.15],
-          ]
           for (const [m, off] of modes) {
             if (tryPressurized(buildCandidate(m, off, py, fJog, tJog))) break
           }
-          if (bestClashes.length === 0) break
+          if (isDone()) break
           for (const mid of dynMids) {
             if (tryPressurized(buildCandidate('x', 0, py, fJog, tJog, mid))) break
           }
-          if (bestClashes.length === 0) break
+          if (isDone()) break
         }
-        if (bestClashes.length === 0) break
+        if (isDone()) break
       }
-      if (bestClashes.length === 0) break
+      if (isDone()) break
     }
   }
 

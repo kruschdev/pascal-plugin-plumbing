@@ -29,6 +29,7 @@ import {
   type RoomPolygon2D,
   type WallOpeningSpan,
   type WallSegment2D,
+  estimateGableRoofYAt,
   extractPlumbingObstacles,
   extractRoomPolygons,
   extractWallOpenings,
@@ -164,6 +165,14 @@ export type PlumbingAutoPopulatePlan = {
 
 function inferFixtureKindFromPascalItem(node: SceneNodeLike): FixtureKind | null {
   const hay = `${node.name ?? ''} ${String(node.assetId ?? '')} ${String(node.category ?? '')} ${String(node.kind ?? '')}`.toLowerCase()
+  // Exclude bathroom decor/accessories and outdoor decorative fountains that share fixture keywords
+  if (
+    /\brug\b|\bmat\b|towel|curtain|paper|\broll\b|brush|holder|caddy|soap|dispenser|sculpture|statue|ornate|mirror|\bshelf\b/.test(
+      hay,
+    )
+  ) {
+    return null
+  }
   if (/toilet|water.?closet|\bwc\b/.test(hay)) return 'water-closet'
   if (/urinal/.test(hay)) return 'urinal'
   if (/bidet/.test(hay)) return 'bidet'
@@ -227,18 +236,25 @@ function sceneBounds(walls: ReadonlyArray<WallSegment2D>, rooms: ReadonlyArray<R
   let maxX = -Infinity
   let minZ = Infinity
   let maxZ = -Infinity
-  for (const w of walls) {
-    minX = Math.min(minX, w.start[0], w.end[0])
-    maxX = Math.max(maxX, w.start[0], w.end[0])
-    minZ = Math.min(minZ, w.start[1], w.end[1])
-    maxZ = Math.max(maxZ, w.start[1], w.end[1])
-  }
-  for (const r of rooms) {
-    for (const [x, z] of r.polygon) {
-      minX = Math.min(minX, x)
-      maxX = Math.max(maxX, x)
-      minZ = Math.min(minZ, z)
-      maxZ = Math.max(maxZ, z)
+  // Always derive building envelope from actual walled footprint when walls exist,
+  // so outer yard / terrace / pool / balcony / spawn zones never inflate indoor bounds.
+  if (walls.length > 0) {
+    for (const w of walls) {
+      minX = Math.min(minX, w.start[0], w.end[0])
+      maxX = Math.max(maxX, w.start[0], w.end[0])
+      minZ = Math.min(minZ, w.start[1], w.end[1])
+      maxZ = Math.max(maxZ, w.start[1], w.end[1])
+    }
+  } else {
+    const nonExterior = rooms.filter((r) => r.category !== 'exterior')
+    const roomPool = nonExterior.length > 0 ? nonExterior : rooms
+    for (const r of roomPool) {
+      for (const [x, z] of r.polygon) {
+        minX = Math.min(minX, x)
+        maxX = Math.max(maxX, x)
+        minZ = Math.min(minZ, z)
+        maxZ = Math.max(maxZ, z)
+      }
     }
   }
   if (!Number.isFinite(minX)) {
@@ -298,6 +314,7 @@ export function planPlumbingAutoPopulate(
   const includeFuelGas = options.includeFuelGas ?? (hasGasWaterHeater || sceneGasAppliances.length > 0)
 
   const walls = extractWallSegments(nodes, levelId)
+  const wallById = new Map<string, WallSegment2D>(walls.map((w) => [w.id, w]))
   const rooms = extractRoomPolygons(nodes, levelId, occupancy)
   const levelH = resolveLevelHeightM(nodes, levelId)
   const obstacles = extractPlumbingObstacles(nodes, levelId)
@@ -316,6 +333,63 @@ export function planPlumbingAutoPopulate(
       ? null
       : extractBonesPlumbingContext(nodes, levelId)
   const bounds = sceneBounds(walls, rooms)
+  const clampToBoundsXZ = (x: number, z: number, margin = 0.15): readonly [number, number] => {
+    const minX = bounds.minX + margin
+    const maxX = bounds.maxX - margin
+    const minZ = bounds.minZ + margin
+    const maxZ = bounds.maxZ - margin
+    return [
+      round2(minX <= maxX ? Math.max(minX, Math.min(maxX, x)) : bounds.cx),
+      round2(minZ <= maxZ ? Math.max(minZ, Math.min(maxZ, z)) : bounds.cz),
+    ]
+  }
+
+  // Filter out exterior zones (pools, patios, terraces, balconies, yards, outdoor spawns) and
+  // any zone whose centroid sits outside the walled building envelope.
+  const indoorRooms = rooms.filter((r) => {
+    if (r.category === 'exterior') return false
+    if (walls.length > 0) {
+      const [cx, cz] = r.centroid
+      if (
+        cx < bounds.minX - 0.15 ||
+        cx > bounds.maxX + 0.15 ||
+        cz < bounds.minZ - 0.15 ||
+        cz > bounds.maxZ + 0.15
+      ) {
+        return false
+      }
+    }
+    return true
+  })
+
+  // Determine pitched roof clearance envelope for the active level so indoor supply & re-vent
+  // pipes stay strictly below the roof plane (only the Main DWV Soil & Vent Stack penetrates).
+  const allVals = Object.values(nodes)
+  const levelNodesList = allVals.filter((n) => n.type === 'level')
+  const curLevelNode = levelId ? nodes[levelId] : levelNodesList[0]
+  const curElev =
+    typeof curLevelNode?.baseElevation === 'number'
+      ? curLevelNode.baseElevation
+      : typeof curLevelNode?.level === 'number'
+        ? curLevelNode.level
+        : 0
+  const hasUpperWalledLevel =
+    curLevelNode !== undefined &&
+    levelNodesList.some((o) => {
+      if (o.id === curLevelNode.id) return false
+      const oElev = typeof o.baseElevation === 'number' ? o.baseElevation : typeof o.level === 'number' ? o.level : 0
+      return oElev > curElev && allVals.some((w) => w.type === 'wall' && w.parentId === o.id)
+    })
+  const levelAssembly = allVals.find(
+    (n) => n.type === 'structural:assembly' && belongsToLevel(nodes, n, levelId),
+  )
+  const roofPitchRise =
+    typeof levelAssembly?.roofPitchRise === 'number' && levelAssembly.roofPitchRise > 0
+      ? levelAssembly.roofPitchRise
+      : 6
+  const maxRoofYAt: (x: number, z: number) => number = hasUpperWalledLevel
+    ? () => levelH
+    : (x, z) => estimateGableRoofYAt(x, z, bounds, levelH, roofPitchRise)
 
   // Spatial clearance predicates covering ALL structural obstacles (floor girders, door/window headers,
   // ceiling/ridge beams, structural columns) + NEC 110.26(E) dedicated electrical spaces + Pascal wall openings.
@@ -381,17 +455,32 @@ export function planPlumbingAutoPopulate(
     z: number,
     pad = 0.16,
     maxShifts: ReadonlyArray<number> = [0.22, -0.22, 0.36, -0.36, 0.52, -0.52],
+    roomPoly?: ReadonlyArray<readonly [number, number]>,
   ): readonly [number, number] => {
-    if (!hitsFloorBeamXZ(x, z, pad)) return [x, z]
-    for (const d of maxShifts) {
-      if (!hitsFloorBeamXZ(x + d, z, pad)) return [x + d, z]
-      if (!hitsFloorBeamXZ(x, z + d, pad)) return [x, z + d]
+    if (floorBeamsForNudge.length === 0 || !hitsFloorBeamXZ(x, z, pad)) return [round2(x), round2(z)]
+    const isValidNudge = (nx: number, nz: number): boolean => {
+      if (
+        nx < bounds.minX + 0.12 ||
+        nx > bounds.maxX - 0.12 ||
+        nz < bounds.minZ + 0.12 ||
+        nz > bounds.maxZ - 0.12
+      ) {
+        return false
+      }
+      if (roomPoly && roomPoly.length >= 3 && !pointInPolygon2D(nx, nz, roomPoly)) {
+        return false
+      }
+      return true
     }
     for (const d of maxShifts) {
-      if (!hitsFloorBeamXZ(x + d, z + d, pad)) return [x + d, z + d]
-      if (!hitsFloorBeamXZ(x + d, z - d, pad)) return [x + d, z - d]
+      if (isValidNudge(x + d, z) && !hitsFloorBeamXZ(x + d, z, pad)) return [round2(x + d), round2(z)]
+      if (isValidNudge(x, z + d) && !hitsFloorBeamXZ(x, z + d, pad)) return [round2(x), round2(z + d)]
     }
-    return [x, z]
+    for (const d of maxShifts) {
+      if (isValidNudge(x + d, z + d) && !hitsFloorBeamXZ(x + d, z + d, pad)) return [round2(x + d), round2(z + d)]
+      if (isValidNudge(x + d, z - d) && !hitsFloorBeamXZ(x + d, z - d, pad)) return [round2(x + d), round2(z - d)]
+    }
+    return [round2(x), round2(z)]
   }
 
   const equipment: PlannedEquipmentSpec[] = []
@@ -417,11 +506,35 @@ export function planPlumbingAutoPopulate(
     const kind = inferFixtureKindFromPascalItem(n)
     if (!kind) continue
     if (!Array.isArray(n.position) || n.position.length < 3) continue
-    const rawPx = Number(n.position[0])
-    const rawPz = Number(n.position[2])
-    const [px, pz] = nudgeOffFloorGirder(rawPx, rawPz, 0.14)
-    const room = rooms.find((r) => pointInPolygon2D(rawPx, rawPz, r.polygon))
-    const nearWall = nearestWallToPoint(px, pz, walls)
+    let rawPx = Number(n.position[0])
+    let rawPz = Number(n.position[2])
+    const hostWall = typeof n.parentId === 'string' ? wallById.get(n.parentId) : undefined
+    if (hostWall) {
+      // Wall-parented Pascal items (e.g. wall-mounted showerheads / sinks) store wall-local [u, y, localZ].
+      const uClamped = Math.max(0.05, Math.min(hostWall.lengthM - 0.05, rawPx))
+      const localZ = Math.max(-0.5, Math.min(0.5, rawPz))
+      rawPx = hostWall.start[0] + hostWall.ux * uClamped + hostWall.nx * localZ
+      rawPz = hostWall.start[1] + hostWall.uz * uClamped + hostWall.nz * localZ
+      if (walls.length > 0) {
+        const [clampedX, clampedZ] = clampToBoundsXZ(rawPx, rawPz, 0.15)
+        rawPx = clampedX
+        rawPz = clampedZ
+      }
+    } else if (
+      walls.length > 0 &&
+      (rawPx < bounds.minX - 0.15 ||
+        rawPx > bounds.maxX + 0.15 ||
+        rawPz < bounds.minZ - 0.15 ||
+        rawPz > bounds.maxZ + 0.15)
+    ) {
+      // Skip outdoor items located outside the walled building envelope
+      continue
+    }
+    const room = indoorRooms.find((r) => pointInPolygon2D(rawPx, rawPz, r.polygon))
+    const [px, pz] = nudgeOffFloorGirder(rawPx, rawPz, 0.14, undefined, room?.polygon)
+    const nearWall = hostWall
+      ? { wall: hostWall, t: 0.5, point: [px, pz] as const, distanceM: 0 }
+      : nearestWallToPoint(px, pz, walls)
     const spec = FIXTURE_SPECS[kind]
     const rot =
       typeof n.rotation === 'number'
@@ -442,7 +555,7 @@ export function planPlumbingAutoPopulate(
 
   // 2. Supplement wet rooms that lack placed Pascal items (or fallback residential core if empty scene)
   const populatedRoomNames = new Set(placedFixtures.map((f) => f.roomName))
-  const wetRooms = rooms.filter((r) => defaultFixturesForRoom(r).length > 0)
+  const wetRooms = indoorRooms.filter((r) => defaultFixturesForRoom(r).length > 0)
 
   const targetWetRooms: RoomPolygon2D[] =
     wetRooms.length > 0
@@ -562,18 +675,20 @@ export function planPlumbingAutoPopulate(
             hitsWallOpening(w.id, candAlong, pad, allowWin) ||
             hitsAnyWallOpeningXZ(cx, cz, Math.min(0.2, pad), allowWin)
 
-          // Keep vertical fixture risers & rough-ins clear of ALL structural beams (floor girders AND
-          // door/window headers), structural columns, and wall openings (IRC R502.8 / R602).
-          if (isFixtureSpotBlocked(wall, alongM, px, pz, 0.26, false)) {
+          // Keep vertical fixture risers & rough-ins strictly inside `room.polygon` and clear of ALL
+          // structural beams (floor girders AND door/window headers), columns, and wall openings (IRC R502.8 / R602).
+          const initialOutsideRoom = room.polygon.length >= 3 && !pointInPolygon2D(px, pz, room.polygon)
+          if (initialOutsideRoom || isFixtureSpotBlocked(wall, alongM, px, pz, 0.26, false)) {
             let foundClear = false
             const maxStep = Math.ceil(wall.lengthM / 0.25)
-            // Pass 1: stay strictly clear of ALL obstacles + doors/windows on primary wall
+            // Pass 1: stay strictly inside room.polygon and clear of ALL obstacles + doors/windows on primary wall
             for (let step = 1; step <= maxStep && !foundClear; step++) {
               for (const dir of [1, -1] as const) {
                 const candAlong = alongM + dir * step * 0.25
                 if (candAlong < 0.28 || candAlong > wall.lengthM - 0.28) continue
                 const cx = wall.start[0] + wall.ux * candAlong + wall.nx * sign * inward
                 const cz = wall.start[1] + wall.uz * candAlong + wall.nz * sign * inward
+                if (room.polygon.length >= 3 && !pointInPolygon2D(cx, cz, room.polygon)) continue
                 if (!isFixtureSpotBlocked(wall, candAlong, cx, cz, 0.26, false)) {
                   alongM = candAlong
                   px = cx
@@ -609,11 +724,7 @@ export function planPlumbingAutoPopulate(
                     if (candAlong < 0.28 || candAlong > w.lengthM - 0.28) continue
                     const cx = w.start[0] + w.ux * candAlong + w.nx * aSign * aInward
                     const cz = w.start[1] + w.uz * candAlong + w.nz * aSign * aInward
-                    if (
-                      room.polygon.length >= 3 &&
-                      !pointInPolygon2D(cx, cz, room.polygon) &&
-                      Math.hypot(cx - room.centroid[0], cz - room.centroid[1]) > 2.5
-                    ) {
+                    if (room.polygon.length >= 3 && !pointInPolygon2D(cx, cz, room.polygon)) {
                       continue
                     }
                     if (!isFixtureSpotBlocked(w, candAlong, cx, cz, 0.24, allowUnderWindow)) {
@@ -629,21 +740,27 @@ export function planPlumbingAutoPopulate(
                 if (foundClear) break
               }
             }
-            // Pass 3: kitchen sink may sit beneath a window (never in a door) as long as floor is clear;
-            // routeVentRun automatically offsets its dry re-vent past the window header jamb!
-            if (!foundClear && allowUnderWindow && !hitsWallOpening(wall.id, alongM, 0.24, true)) {
-              const [nx, nz] = nudgeOffFloorGirder(px, pz, 0.22)
-              px = nx
-              pz = nz
-            } else if (!foundClear) {
-              const [nx, nz] = nudgeOffFloorGirder(px, pz, 0.22)
+            // Pass 3: keep fixture inside room.polygon & off doorways, then nudge off any floor girder
+            if (!foundClear) {
+              if (
+                (room.polygon.length >= 3 && !pointInPolygon2D(px, pz, room.polygon)) ||
+                hitsWallOpening(wall.id, alongM, 0.24, allowUnderWindow)
+              ) {
+                px = room.centroid[0]
+                pz = room.centroid[1]
+              }
+              const [nx, nz] = nudgeOffFloorGirder(px, pz, 0.22, undefined, room.polygon)
               px = nx
               pz = nz
             }
           }
         } else {
           px = room.centroid[0] + (i - (count - 1) / 2) * 0.75
-          const [nx, nz] = nudgeOffFloorGirder(px, pz, 0.22)
+          if (room.polygon.length >= 3 && !pointInPolygon2D(px, pz, room.polygon)) {
+            px = room.centroid[0]
+            pz = room.centroid[1]
+          }
+          const [nx, nz] = nudgeOffFloorGirder(px, pz, 0.22, undefined, room.polygon)
           px = nx
           pz = nz
         }
@@ -674,27 +791,40 @@ export function planPlumbingAutoPopulate(
     // Keep hose bibb & its cold supply tap (+0.06m X) clear of central floor girders, headers & openings!
     const hoseBibbSpec = FIXTURE_SPECS['hose-bibb']
     const hoseWsfu = getFixtureWsfu('hose-bibb', occupancy)
-    const pickClearHoseBibbX = (z: number): number => {
-      const minX = bounds.minX + 0.35
-      const maxX = bounds.maxX - 0.35
+    const pickClearHoseBibbOnSide = (side: 'front' | 'rear'): Vec3 => {
+      const targetZ = side === 'front' ? bounds.maxZ : bounds.minZ
+      const zOffset = side === 'front' ? 0.08 : -0.08
+      const horizWalls = walls
+        .filter((w) => Math.abs(w.start[1] - w.end[1]) < 0.25 && Math.abs(w.end[0] - w.start[0]) >= 0.8)
+        .map((w) => ({
+          z: (w.start[1] + w.end[1]) / 2,
+          minX: Math.min(w.start[0], w.end[0]),
+          maxX: Math.max(w.start[0], w.end[0]),
+        }))
+        .sort((a, b) => Math.abs(a.z - targetZ) - Math.abs(b.z - targetZ))
+      const primaryWall = horizWalls[0]
+      const wallZ = primaryWall ? round2(primaryWall.z + zOffset) : round2(targetZ + zOffset)
+      const minX = primaryWall ? primaryWall.minX + 0.35 : bounds.minX + 0.35
+      const maxX = primaryWall ? primaryWall.maxX - 0.35 : bounds.maxX - 0.35
+      const baseX = primaryWall
+        ? Math.max(minX, Math.min(maxX, bounds.cx))
+        : bounds.cx
       const isClearAt = (x: number, pad: number): boolean =>
-        !hitsFloorBeamXZ(x, z, pad) &&
-        !hitsFloorBeamXZ(x + 0.06, z, pad) &&
-        !hitsAnyObstacleXZ(x, z, pad * 0.7) &&
-        !hitsAnyObstacleXZ(x + 0.06, z, pad * 0.7) &&
-        !hitsAnyWallOpeningXZ(x, z, 0.22, false)
+        !hitsFloorBeamXZ(x, wallZ, pad) &&
+        !hitsFloorBeamXZ(x + 0.06, wallZ, pad) &&
+        !hitsAnyObstacleXZ(x, wallZ, pad * 0.7) &&
+        !hitsAnyObstacleXZ(x + 0.06, wallZ, pad * 0.7) &&
+        !hitsAnyWallOpeningXZ(x, wallZ, 0.22, false)
       for (const pad of [0.30, 0.16]) {
         for (const shift of [0, 0.55, -0.55, 0.95, -0.95, 1.4, -1.4, 2.0, -2.0, 2.6, -2.6]) {
-          const cx = round2(Math.max(minX, Math.min(maxX, bounds.cx + shift)))
-          if (isClearAt(cx, pad)) return cx
+          const cx = round2(Math.max(minX, Math.min(maxX, baseX + shift)))
+          if (isClearAt(cx, pad)) return [cx, hoseBibbSpec.roughInHeightM, wallZ]
         }
       }
-      return round2(bounds.cx)
+      return [round2(baseX), hoseBibbSpec.roughInHeightM, wallZ]
     }
-    const frontBibbZ = round2(bounds.maxZ + 0.08)
-    const rearBibbZ = round2(bounds.minZ - 0.08)
-    const frontBibbPos: Vec3 = [pickClearHoseBibbX(frontBibbZ), hoseBibbSpec.roughInHeightM, frontBibbZ]
-    const rearBibbPos: Vec3 = [pickClearHoseBibbX(rearBibbZ), hoseBibbSpec.roughInHeightM, rearBibbZ]
+    const frontBibbPos: Vec3 = pickClearHoseBibbOnSide('front')
+    const rearBibbPos: Vec3 = pickClearHoseBibbOnSide('rear')
     fixtures.push(
       {
         id: nextFixId(),
@@ -740,14 +870,14 @@ export function planPlumbingAutoPopulate(
   // 4. Place Mechanical Core: Water Entry (PRV + Shutoff), Water Heater, Expansion Tank, PEX Manifold, optional Gas Meter
   // Prefer a dedicated Utility/Garage/Laundry room; when none exists, tuck the mechanical core cleanly into
   // a corner alcove of the wet core (Kitchen/Bath) instead of dropping a water heater in the middle of a Living Room,
-  // and stay clear of any existing floor-mounted HVAC equipment or NEC 110.26 electrical panels.
+  // and stay strictly inside the walled building bounds and clear of floor HVAC / NEC 110.26 panels.
   const dedicatedMechRoom =
-    rooms.find((r) => r.category === 'utility' || r.category === 'garage' || r.category === 'laundry') ?? null
+    indoorRooms.find((r) => r.category === 'utility' || r.category === 'garage' || r.category === 'laundry') ?? null
   const mechRoom =
     dedicatedMechRoom ??
-    rooms.find((r) => r.category === 'kitchen' || r.category === 'commercial-kitchen') ??
-    rooms.find((r) => r.category === 'bathroom' || r.category === 'master-bath' || r.category === 'commercial-restroom') ??
-    rooms[0] ??
+    indoorRooms.find((r) => r.category === 'kitchen' || r.category === 'commercial-kitchen') ??
+    indoorRooms.find((r) => r.category === 'bathroom' || r.category === 'master-bath' || r.category === 'commercial-restroom') ??
+    indoorRooms[0] ??
     null
 
   const crossTradeFloorEquip: Array<{ x: number; z: number; minClearM: number }> = []
@@ -763,15 +893,6 @@ export function planPlumbingAutoPopulate(
     }
   }
 
-  const floorBeams = obstacles.filter((o) => o.category === 'structural' && o.box.minY < 0.15)
-  const hitsFloorBeam = (cx: number, cz: number): boolean =>
-    floorBeams.some(
-      (b) =>
-        cx >= b.box.minX - 0.35 &&
-        cx <= b.box.maxX + 0.35 &&
-        cz >= b.box.minZ - 0.35 &&
-        cz <= b.box.maxZ + 0.35,
-    )
   const minClearCrossTrade = (cx: number, cz: number): number => {
     let best = Infinity
     for (const eq of crossTradeFloorEquip) {
@@ -787,7 +908,28 @@ export function planPlumbingAutoPopulate(
 
   const pickWallTuckedMechCorner = (room: RoomPolygon2D | null): [number, number] => {
     if (!room || room.polygon.length < 3) {
-      return [round2(bounds.minX + 0.55), round2(bounds.minZ + 0.55)]
+      // When no indoor zone polygons exist, anchor near the first indoor fixture (tucked inward)
+      // or cleanly inside the walled building bounds.
+      const indoorFix = fixtures.find((f) => f.fixtureKind !== 'hose-bibb')
+      if (indoorFix) {
+        const nw = nearestWallToPoint(indoorFix.position[0], indoorFix.position[2], walls)
+        if (nw) {
+          const w = nw.wall
+          const toCx = bounds.cx - nw.point[0]
+          const toCz = bounds.cz - nw.point[1]
+          const sign = toCx * w.nx + toCz * w.nz >= 0 ? 1 : -1
+          const [cx, cz] = clampToBoundsXZ(
+            nw.point[0] + w.nx * sign * 0.45,
+            nw.point[1] + w.nz * sign * 0.45,
+            0.25,
+          )
+          return [cx, cz]
+        }
+        const [cx, cz] = clampToBoundsXZ(indoorFix.position[0], indoorFix.position[2], 0.25)
+        return [cx, cz]
+      }
+      const [cx, cz] = clampToBoundsXZ(bounds.minX + 0.55, bounds.minZ + 0.55, 0.25)
+      return [cx, cz]
     }
     const inset = 0.42
     const candidates: Array<readonly [number, number]> = []
@@ -814,7 +956,7 @@ export function planPlumbingAutoPopulate(
     for (const [cx, cz] of candidates) {
       if (!pointInPolygon2D(cx, cz, room.polygon)) continue
       if (cx < bounds.minX + 0.2 || cx > bounds.maxX - 0.2 || cz < bounds.minZ + 0.2 || cz > bounds.maxZ - 0.2) continue
-      const beamPenalty = hitsFloorBeam(cx, cz) ? -80 : 40
+      const beamPenalty = hitsFloorBeamXZ(cx, cz, 0.35) ? -80 : 40
       const clear = minClearCrossTrade(cx, cz)
       const clearScore = clear >= 0 ? 60 + Math.min(1.5, clear) * 10 : clear * 60
       // Prefer exterior wall corners for short water-entry / condensate / flue runs
@@ -830,31 +972,12 @@ export function planPlumbingAutoPopulate(
         best = [cx, cz]
       }
     }
-    return best ?? [round2(room.centroid[0]), round2(room.centroid[1])]
+    if (best) return best
+    const [fx, fz] = clampToBoundsXZ(room.centroid[0], room.centroid[1], 0.2)
+    return [fx, fz]
   }
 
-  const nudgeOffStructuralBeams = (x: number, z: number): [number, number] => {
-    if (floorBeams.length === 0) return [round2(x), round2(z)]
-    if (!hitsFloorBeam(x, z)) return [round2(x), round2(z)]
-    for (const [dx, dz] of [
-      [0, 0.55],
-      [0, -0.55],
-      [0.55, 0],
-      [-0.55, 0],
-      [0, 0.95],
-      [0, -0.95],
-      [0.95, 0],
-      [-0.95, 0],
-    ] as const) {
-      const cx = round2(x + dx)
-      const cz = round2(z + dz)
-      if (cx < bounds.minX + 0.12 || cx > bounds.maxX - 0.12 || cz < bounds.minZ + 0.12 || cz > bounds.maxZ - 0.12) {
-        continue
-      }
-      if (!hitsFloorBeam(cx, cz)) return [cx, cz]
-    }
-    return [round2(x), round2(z)]
-  }
+  const mechNudgeShifts: ReadonlyArray<number> = [0.55, -0.55, 0.95, -0.95]
 
   const [cornerWhX, cornerWhZ] = pickWallTuckedMechCorner(mechRoom)
   let whPos: Vec3 = [cornerWhX, 0, cornerWhZ]
@@ -865,7 +988,8 @@ export function planPlumbingAutoPopulate(
       bonesAnchorsUsed.push(`water-heater (${bones.waterHeaterAnchor.nodeId})`)
     }
   } else {
-    const [cx, cz] = nudgeOffStructuralBeams(whPos[0], whPos[2])
+    const [nx, nz] = nudgeOffFloorGirder(whPos[0], whPos[2], 0.35, mechNudgeShifts, mechRoom?.polygon)
+    const [cx, cz] = clampToBoundsXZ(nx, nz, 0.15)
     whPos = [cx, 0, cz]
   }
 
@@ -877,7 +1001,8 @@ export function planPlumbingAutoPopulate(
       bonesAnchorsUsed.push(`water-entry (${bones.waterEntryAnchor.nodeId})`)
     }
   } else {
-    const [ex, ez] = nudgeOffStructuralBeams(waterEntryPos[0], waterEntryPos[2])
+    const [nx, nz] = nudgeOffFloorGirder(waterEntryPos[0], waterEntryPos[2], 0.35, mechNudgeShifts)
+    const [ex, ez] = clampToBoundsXZ(nx, nz, 0.15)
     waterEntryPos = [ex, 0.75, ez]
   }
 
@@ -971,16 +1096,30 @@ export function planPlumbingAutoPopulate(
         return [dx, dz]
       }
     }
-    return [1, 0]
+    for (const [dx, dz] of dirs) {
+      const tx = round2(whPos[0] + dx * distM)
+      const tz = round2(whPos[2] + dz * distM)
+      if (
+        tx >= bounds.minX + 0.15 &&
+        tx <= bounds.maxX - 0.15 &&
+        tz >= bounds.minZ + 0.15 &&
+        tz <= bounds.maxZ - 0.15
+      ) {
+        return [dx, dz]
+      }
+    }
+    return [0, 0]
   }
   const [mechDirX, mechDirZ] = pickInwardDir(0.68)
 
+  const [expX, expZ] = clampToBoundsXZ(whPos[0] + mechDirX * 0.35, whPos[2] + mechDirZ * 0.35, 0.15)
+  const expTankY = round2(Math.min(1.65, Math.max(1.1, levelH - 0.7)))
   const expTankId = nextEqId()
   equipment.push({
     id: expTankId,
     name: `Thermal Expansion Tank (${whSizing.expansionTankGal} gal, IPC 607.3)`,
     equipmentKind: 'expansion-tank',
-    position: [round2(whPos[0] + mechDirX * 0.35), 1.65, round2(whPos[2] + mechDirZ * 0.35)],
+    position: [expX, expTankY, expZ],
     rotation: 0,
     roomName: mechRoom?.name ?? 'Utility',
     capacityGal: whSizing.expansionTankGal,
@@ -988,12 +1127,16 @@ export function planPlumbingAutoPopulate(
   })
 
   let manifoldId: string | undefined
-  const rawManifoldX = round2(whPos[0] + mechDirX * 0.65)
-  const rawManifoldZ = round2(whPos[2] + mechDirZ * 0.65)
-  const [manX, manZ] = hitsFloorBeamXZ(rawManifoldX, rawManifoldZ, 0.25)
-    ? nudgeOffStructuralBeams(rawManifoldX, rawManifoldZ)
-    : [rawManifoldX, rawManifoldZ]
-  const manifoldPos: Vec3 = [round2(manX), 1.35, round2(manZ)]
+  const [rawManifoldX, rawManifoldZ] = clampToBoundsXZ(whPos[0] + mechDirX * 0.65, whPos[2] + mechDirZ * 0.65, 0.15)
+  const [nudgedManX, nudgedManZ] = nudgeOffFloorGirder(
+    rawManifoldX,
+    rawManifoldZ,
+    0.25,
+    mechNudgeShifts,
+    mechRoom?.polygon,
+  )
+  const [manX, manZ] = clampToBoundsXZ(nudgedManX, nudgedManZ, 0.15)
+  const manifoldPos: Vec3 = [manX, 1.35, manZ]
   if (supplyTopology === 'manifold') {
     manifoldId = nextManId()
     const neededPorts = Math.max(12, Math.ceil((fixtures.length * 1.6) / 6) * 6)
@@ -1026,6 +1169,8 @@ export function planPlumbingAutoPopulate(
     material: supplyMaterial,
     euclideanInCavity: false,
     obstacles,
+    buildingBounds: bounds,
+    maxRoofYAt,
   })
   pipeRuns.push({
     id: nextPipeId(),
@@ -1065,6 +1210,8 @@ export function planPlumbingAutoPopulate(
       material: supplyMaterial,
       euclideanInCavity: false,
       obstacles,
+      buildingBounds: bounds,
+      maxRoofYAt,
     })
     pipeRuns.push({
       id: nextPipeId(),
@@ -1136,6 +1283,8 @@ export function planPlumbingAutoPopulate(
         material: supplyMaterial,
         euclideanInCavity: false,
         obstacles,
+        buildingBounds: bounds,
+        maxRoofYAt,
       })
       coldTrunkId = nextPipeId()
       coldTrunkSpine = coldTrunkRoute.path
@@ -1167,6 +1316,8 @@ export function planPlumbingAutoPopulate(
           material: supplyMaterial,
           euclideanInCavity: false,
           obstacles,
+          buildingBounds: bounds,
+          maxRoofYAt,
         })
         hotTrunkId = nextPipeId()
         hotTrunkSpine = hotTrunkRoute.path
@@ -1293,7 +1444,7 @@ export function planPlumbingAutoPopulate(
         if (cleared) break
       }
       if (!cleared) {
-        stackPt = nudgeOffStructuralBeams(stackPt[0], stackPt[1])
+        stackPt = nudgeOffFloorGirder(stackPt[0], stackPt[1], 0.35, mechNudgeShifts)
         stackWallId = undefined
       }
     }
@@ -1342,6 +1493,7 @@ export function planPlumbingAutoPopulate(
         foundationType,
         slopeInPerFt: 0.25,
         obstacles,
+        buildingBounds: bounds,
       })
       const arrivalY = dwvRoute.path[dwvRoute.path.length - 1]?.[1]
       if (typeof arrivalY === 'number' && arrivalY < minBranchArrivalY) {
@@ -1379,6 +1531,8 @@ export function planPlumbingAutoPopulate(
           nominalSize: fix.ventSize,
           material: dwvMaterial,
           obstacles,
+          buildingBounds: bounds,
+          maxRoofYAt,
         })
         branchPipeRuns.push({
           id: nextPipeId(),
@@ -1424,6 +1578,8 @@ export function planPlumbingAutoPopulate(
         material: supplyMaterial,
         euclideanInCavity: false,
         obstacles,
+        buildingBounds: bounds,
+        maxRoofYAt,
       })
       branchPipeRuns.push({
         id: nextPipeId(),
@@ -1467,6 +1623,8 @@ export function planPlumbingAutoPopulate(
         material: supplyMaterial,
         euclideanInCavity: false,
         obstacles,
+        buildingBounds: bounds,
+        maxRoofYAt,
       })
       const distFromWh = Math.hypot(fix.position[0] - whPos[0], fix.position[2] - whPos[2])
       if (distFromWh > maxHotDist) {
@@ -1552,23 +1710,29 @@ export function planPlumbingAutoPopulate(
   // 7. Optional Hot Water Recirculation Return Loop (for long hot runs > 40 ft or when requested)
   if (includeHotRecirc && furthestHotFixture) {
     const recircId = nextEqId()
+    const rawRecircX = whPos[0] - 0.35 >= bounds.minX + 0.15 ? whPos[0] - 0.35 : whPos[0] + mechDirX * 0.35
+    const rawRecircZ = whPos[0] - 0.35 >= bounds.minX + 0.15 ? whPos[2] : whPos[2] + mechDirZ * 0.35
+    const [recX, recZ] = clampToBoundsXZ(rawRecircX, rawRecircZ, 0.15)
+    const recircPos: Vec3 = [recX, 1.25, recZ]
     equipment.push({
       id: recircId,
       name: 'Hot Water Recirculation Pump',
       equipmentKind: 'recirc-pump',
-      position: [round2(whPos[0] - 0.35), 1.25, round2(whPos[2])],
+      position: recircPos,
       rotation: 0,
       roomName: mechRoom?.name ?? 'Utility',
       electricalDemand: getEquipmentElectricalDemand('recirc-pump'),
     })
     const recircRoute = routePressurizedPipeRun({
       from: furthestHotFixture.position,
-      to: [round2(whPos[0] - 0.35), 1.25, round2(whPos[2])],
+      to: recircPos,
       routingPlaneY: supplyPlaneY + 0.08,
       nominalSize: '1/2"',
       material: supplyMaterial,
       euclideanInCavity: false,
       obstacles,
+      buildingBounds: bounds,
+      maxRoofYAt,
     })
     pipeRuns.push({
       id: nextPipeId(),
@@ -1626,6 +1790,7 @@ export function planPlumbingAutoPopulate(
         material: 'black-iron',
         euclideanInCavity: false,
         obstacles,
+        maxRoofYAt,
       })
       const gasSizing = sizeFuelGasPipe({
         totalBtuh: target.btuh,
