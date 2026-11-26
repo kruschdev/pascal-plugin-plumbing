@@ -118,6 +118,7 @@ export const plumbingAgentTools: PluginAgentTools = {
         capacityGal: z.number().min(0).max(500).optional(),
         gasBtuh: z.number().min(0).max(500000).optional(),
         watts: z.number().min(0).max(50000).optional(),
+        roomVolumeCuFt: z.number().min(0).max(50000).optional(),
       },
       annotations: { destructiveHint: false, idempotentHint: false },
     },
@@ -129,7 +130,7 @@ export const plumbingAgentTools: PluginAgentTools = {
       runsIn: 'operation',
       input: {
         levelId: z.string().optional(),
-        name: z.string().default('PEX Home-Run Manifold (12-Port)'),
+        name: z.string().optional(),
         manifoldKind: z.enum(['pex-homerun', 'copper-header', 'gas-csst']).default('pex-homerun'),
         position: Vec3,
         rotation: z.number().default(0),
@@ -199,7 +200,7 @@ export const plumbingAgentTools: PluginAgentTools = {
             'water-heater-hpwh',
           ])
           .default('water-heater-tank-electric'),
-        includeFuelGas: z.boolean().default(false),
+        includeFuelGas: z.boolean().optional(),
         includeDryerVent: z.boolean().default(true),
         includeHotRecirc: z.boolean().default(false),
         bonesMode: z.enum(['auto', 'import-only', 'ignore']).default('auto'),

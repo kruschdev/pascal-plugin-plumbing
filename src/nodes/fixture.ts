@@ -72,7 +72,7 @@ export const PlumbingFixtureNode = BaseNode.extend({
   drainSize: PipeNominalSizeEnum.nullable().default('1-1/2"'),
   ventSize: PipeNominalSizeEnum.nullable().default('1-1/2"'),
   supplySize: PipeNominalSizeEnum.nullable().default('1/2"'),
-  hasVacuumBreaker: z.boolean().default(true),
+  hasVacuumBreaker: z.boolean().default(false),
   hasPTrap: z.boolean().default(true),
   electricalDemand: ElectricalDemandSchema.nullable().optional(),
 })
@@ -194,7 +194,7 @@ export const plumbingFixtureRenderDefinition: NodeDefinition<typeof PlumbingFixt
     drainSize: '1-1/2"',
     ventSize: '1-1/2"',
     supplySize: '1/2"',
-    hasVacuumBreaker: true,
+    hasVacuumBreaker: false,
     hasPTrap: true,
     electricalDemand: getFixtureElectricalDemand('lavatory'),
   }),

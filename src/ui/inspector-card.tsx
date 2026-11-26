@@ -9,7 +9,6 @@ import { openEditorView, useScene } from '@pascal-app/editor'
 import { useMemo } from 'react'
 import { auditScenePlumbing } from '../ipc/audit'
 import {
-  type ElectricalPowerDemand,
   type SceneNodeLike,
   type Vec3,
   computePipeFramingPenetrations,
@@ -17,6 +16,7 @@ import {
   resolveNodeLevelId,
 } from '../ipc/framing-interop'
 import { extractWallSegments, measureDrainPathSlope, polylineLengthM } from '../ipc/routing'
+import { resolveNodeElectricalDemand } from '../ipc/schedule'
 import { METERS_TO_FEET, type PipeMaterial, type PipeNominalSize, round2 } from '../ipc/tables'
 import { PLUMBING_SCHEDULE_VIEW_ID } from './plumbing-panel'
 import { usePlumbingUi } from './store'
@@ -64,7 +64,7 @@ export default function PlumbingInspectorCard({ node }: { node?: AnyNode }) {
     openEditorView(PLUMBING_SCHEDULE_VIEW_ID, { beside: true })
   }
 
-  const demand = raw.electricalDemand as ElectricalPowerDemand | null | undefined
+  const demand = resolveNodeElectricalDemand(raw)
 
   return (
     <div style={{ padding: 10, display: 'flex', flexDirection: 'column', gap: 6, fontSize: 12 }}>

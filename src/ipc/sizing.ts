@@ -18,9 +18,11 @@ import {
   IPC_MAX_TRAP_ARM_FT,
   IPC_VENT_SIZING_TABLE,
   type OccupancyType,
+  PIPE_NOMINAL_INCHES,
   type PipeNominalSize,
   SUPPLY_ID_INCHES,
   SUPPLY_MATERIAL_HYDRAULICS,
+  comparePipeSizes,
   largerPipeSize,
   round2,
 } from './tables'
@@ -155,18 +157,27 @@ export function sizeVentStack(params: {
   isMainStack?: boolean
   developedLengthFt?: number
 }): { recommendedSize: PipeNominalSize; maxDevelopedFt: number; codeRef: string } {
-  const { totalDfu, isMainStack = true } = params
+  const { totalDfu, isMainStack = true, developedLengthFt = 0 } = params
   let row = IPC_VENT_SIZING_TABLE[IPC_VENT_SIZING_TABLE.length - 1]!
   for (const entry of IPC_VENT_SIZING_TABLE) {
-    if (totalDfu <= entry.maxDfu) {
+    if (totalDfu <= entry.maxDfu && developedLengthFt <= entry.maxDevelopedFt) {
       row = entry
       break
     }
   }
-  const size = isMainStack ? largerPipeSize(row.minVentIn, '3"') : row.minVentIn
+  const minRequiredSize = isMainStack ? largerPipeSize(row.minVentIn, '3"') : row.minVentIn
+  const finalRow =
+    IPC_VENT_SIZING_TABLE.find(
+      (entry) =>
+        comparePipeSizes(entry.minVentIn, minRequiredSize) >= 0 &&
+        totalDfu <= entry.maxDfu &&
+        developedLengthFt <= entry.maxDevelopedFt,
+    ) ??
+    IPC_VENT_SIZING_TABLE.find((entry) => comparePipeSizes(entry.minVentIn, minRequiredSize) >= 0) ??
+    IPC_VENT_SIZING_TABLE[IPC_VENT_SIZING_TABLE.length - 1]!
   return {
-    recommendedSize: size,
-    maxDevelopedFt: row.maxDevelopedFt,
+    recommendedSize: finalRow.minVentIn,
+    maxDevelopedFt: finalRow.maxDevelopedFt,
     codeRef: isMainStack ? 'IPC 903.1 / Table 906.1' : 'IPC Table 906.1',
   }
 }
@@ -241,7 +252,7 @@ export function calculateSupplyHydraulics(params: {
   const { gpm, size, material = 'pex-a', isHot = false, lengthFt = 50 } = params
   const hyd = SUPPLY_MATERIAL_HYDRAULICS[material]
   const idMap = SUPPLY_ID_INCHES[material]
-  const idIn = idMap[size] ?? 0.671
+  const idIn = idMap[size] ?? round2((PIPE_NOMINAL_INCHES[size] ?? 0.75) * 0.85)
 
   // v (ft/s) = 0.4085 * Q (gpm) / d(in)^2
   const velocityFps = gpm > 0 ? round2((0.4085 * gpm) / (idIn * idIn)) : 0
@@ -291,7 +302,7 @@ export function sizeSupplyPipe(params: {
     maxFrictionPsiPer100Ft = 15,
   } = params
   const gpm = wsfuToGpm(wsfu, flushType)
-  const candidates: PipeNominalSize[] = ['1/2"', '3/4"', '1"', '1-1/4"', '1-1/2"', '2"']
+  const candidates: PipeNominalSize[] = ['1/2"', '3/4"', '1"', '1-1/4"', '1-1/2"', '2"', '2-1/2"', '3"', '4"', '6"']
   const startIdx = Math.max(0, candidates.indexOf(minSize))
 
   let lastResult = calculateSupplyHydraulics({
@@ -359,9 +370,17 @@ export function sizeWaterHeater(params: {
   const expansionTankGal = recommendedTankGal <= 50 ? 2.0 : 4.5
 
   const electricalLoadWatts =
-    fuelType === 'electric' ? 4500 : fuelType === 'hpwh' ? 4500 : 0
+    fuelType === 'electric' || fuelType === 'hpwh'
+      ? 4500
+      : fuelType === 'tankless-gas'
+        ? 300
+        : 0
   const electricalBreakerAmps =
-    fuelType === 'electric' || fuelType === 'hpwh' ? 30 : 0
+    fuelType === 'electric' || fuelType === 'hpwh'
+      ? 30
+      : fuelType === 'tankless-gas'
+        ? 15
+        : 0
   const gasBtuh =
     fuelType === 'tankless-gas'
       ? recommendedTanklessBtuh
@@ -404,6 +423,7 @@ export function sizeFuelGasPipe(params: {
 }): FuelGasSizingResult {
   const { totalBtuh, longestRunFt, material = 'black-iron' } = params
   const kbtuh = Math.max(0, totalBtuh / 1000)
+  const exceedsMaxTableLength = longestRunFt > 200
 
   if (material === 'csst') {
     const row =
@@ -418,7 +438,7 @@ export function sizeFuelGasPipe(params: {
           material,
           recommendedSize: sz,
           capacityBtuh: row.capacityBySize[sz] * 1000,
-          ok: true,
+          ok: !exceedsMaxTableLength,
           codeRef: 'IFGC Table 402.4(15)',
         }
       }
@@ -453,7 +473,7 @@ export function sizeFuelGasPipe(params: {
         material,
         recommendedSize: sz,
         capacityBtuh: row.capacityBySize[sz] * 1000,
-        ok: true,
+        ok: !exceedsMaxTableLength,
         codeRef: 'IFGC Table 402.4(2)',
       }
     }

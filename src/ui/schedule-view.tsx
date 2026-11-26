@@ -28,6 +28,7 @@ export default function PlumbingScheduleView() {
   const {
     codeEdition,
     occupancy,
+    supplyMaterial,
     activeTab,
     setActiveTab,
     selectedManifoldId,
@@ -43,8 +44,8 @@ export default function PlumbingScheduleView() {
 
   const record = nodes as unknown as Readonly<Record<string, SceneNodeLike>>
   const schedule = useMemo(
-    () => buildPlumbingSchedule(record, { codeEdition, occupancy }),
-    [record, codeEdition, occupancy],
+    () => buildPlumbingSchedule(record, { codeEdition, occupancy, supplyMaterial }),
+    [record, codeEdition, occupancy, supplyMaterial],
   )
   const audit = useMemo(
     () => auditScenePlumbing(record, { codeEdition, occupancy }),
@@ -249,7 +250,7 @@ export default function PlumbingScheduleView() {
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           {audit.findings.length === 0 && (
             <div style={{ padding: 12, borderRadius: 8, background: 'rgba(34,197,94,0.14)', border: '1px solid #22c55e' }}>
-              0 Errors · 0 Warnings — All IPC/UPC/IFGC/IRC &amp; NEC 110.26(E) checks passed!
+              0 Errors · 0 Warnings. All IPC/UPC/IFGC/IRC &amp; NEC 110.26(E) checks passed!
             </div>
           )}
           {audit.findings.map((f) => (
@@ -317,15 +318,33 @@ export default function PlumbingScheduleView() {
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', alignItems: 'center' }}>
             <label>
               Labor $/hr:{' '}
-              <input type="number" value={laborRateUsd} onChange={(e) => setLaborRateUsd(Number(e.target.value) || 0)} style={numInputStyle} />
+              <input
+                type="number"
+                min={0}
+                value={laborRateUsd}
+                onChange={(e) => setLaborRateUsd(Math.max(0, Number(e.target.value) || 0))}
+                style={numInputStyle}
+              />
             </label>
             <label>
               Markup %:{' '}
-              <input type="number" value={materialMarkupPct} onChange={(e) => setMaterialMarkupPct(Number(e.target.value) || 0)} style={numInputStyle} />
+              <input
+                type="number"
+                min={0}
+                value={materialMarkupPct}
+                onChange={(e) => setMaterialMarkupPct(Math.max(0, Number(e.target.value) || 0))}
+                style={numInputStyle}
+              />
             </label>
             <label>
               Tax %:{' '}
-              <input type="number" value={salesTaxPct} onChange={(e) => setSalesTaxPct(Number(e.target.value) || 0)} style={numInputStyle} />
+              <input
+                type="number"
+                min={0}
+                value={salesTaxPct}
+                onChange={(e) => setSalesTaxPct(Math.max(0, Number(e.target.value) || 0))}
+                style={numInputStyle}
+              />
             </label>
             <button type="button" onClick={() => copyCsv('BOM', formatPlumbingBomCsv(bom))} style={btnStyle}>
               Copy BOM CSV

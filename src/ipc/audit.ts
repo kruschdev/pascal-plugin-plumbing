@@ -29,6 +29,8 @@ import {
   checkDryerVentRun,
   checkTrapArmDistance,
   getMinRequiredDrainSlopeInPerFt,
+  sizeBuildingDrain,
+  sizeDrainBranch,
   sizeFuelGasPipe,
   wsfuToGpm,
 } from './sizing'
@@ -219,6 +221,14 @@ export function auditScenePlumbing(
     }
   }
 
+  const wcCountByLevel = new Map<string, number>()
+  for (const fix of fixtures) {
+    if (fix.fixtureKind === 'water-closet') {
+      const lvlKey = resolveNodeLevelId(nodes, fix) ?? '__root__'
+      wcCountByLevel.set(lvlKey, (wcCountByLevel.get(lvlKey) ?? 0) + 1)
+    }
+  }
+
   const dwvStateByLevel = new Map<
     string,
     { hasAnyDwvDrain: boolean; hasAnyCleanout: boolean; hasMainVentStack: boolean; sampleDrainIds: string[] }
@@ -246,12 +256,28 @@ export function auditScenePlumbing(
     const lvlState = getLevelDwvState(runLevelKey)
 
     if (run.hasCleanout === true) lvlState.hasAnyCleanout = true
-    if (run.isMainVentStack === true) lvlState.hasMainVentStack = true
+    if (run.isMainVentStack === true) {
+      lvlState.hasMainVentStack = true
+      if (comparePipeSizes(size, '3"') < 0) {
+        push({
+          severity: 'error',
+          codeRef: 'IPC 903.1',
+          title: `Main vent stack (${size}) below 3" minimum diameter`,
+          detail: `${run.name ?? run.id} is marked as a main vent stack but is sized ${size} instead of at least 3".`,
+          suggestedFix: 'Upsize the main vent stack through roof to at least 3" per IPC 903.1.',
+          nodeIds: [run.id],
+        })
+      }
+    }
 
-    // Structural & NEC 110.26(E) obstacle clashes (strictly same-level!)
+    // Structural & NEC 110.26(E) obstacle clashes (strictly same-level, deduplicated by base obstacle nodeId)
     if (path.length >= 2) {
       const clashes = detectPlumbingClashes(path, getObstaclesForLevel(runLevelId), pipeRadiusM)
+      const reportedObsIds = new Set<string>()
       for (const obs of clashes) {
+        const obsNodeId = obs.nodeId ?? obs.id.replace(/:seg\d+$/, '')
+        if (reportedObsIds.has(obsNodeId)) continue
+        reportedObsIds.add(obsNodeId)
         if (obs.category === 'electrical-dedicated-space') {
           push({
             severity: 'error',
@@ -259,7 +285,7 @@ export function auditScenePlumbing(
             title: 'Plumbing pipe invades electrical panel dedicated overhead space',
             detail: `${run.name ?? run.id} passes directly above ${obs.label}.`,
             suggestedFix: 'Reroute pipe horizontally clear of the electrical panel footprint or install drip-shield protection above structural ceiling.',
-            nodeIds: [run.id, obs.id],
+            nodeIds: [run.id, obsNodeId],
           })
         } else {
           push({
@@ -268,7 +294,7 @@ export function auditScenePlumbing(
             title: 'Pipe run collides with structural member',
             detail: `${run.name ?? run.id} intersects ${obs.label}.`,
             suggestedFix: 'Offset pipe around structural beam or column; never cut primary structural members.',
-            nodeIds: [run.id, obs.id],
+            nodeIds: [run.id, obsNodeId],
           })
         }
       }
@@ -306,9 +332,65 @@ export function auditScenePlumbing(
     if (system === 'dwv-drain') {
       lvlState.hasAnyDwvDrain = true
       if (lvlState.sampleDrainIds.length < 1) lvlState.sampleDrainIds.push(run.id)
+
+      // IPC Table 710.1(1) / 710.1(2) DFU & water-closet drain sizing check
+      const slopeInfo = path.length >= 2 ? measureDrainPathSlope(path) : null
+      const dfuLoad = typeof run.dfuLoad === 'number' && run.dfuLoad > 0 ? run.dfuLoad : 0
+      const srcNode = typeof run.sourceNodeId === 'string' ? nodes[run.sourceNodeId] : undefined
+      const isMainBuildingDrain =
+        Boolean(srcNode?.type === 'plumbing:pipe-run' && srcNode.isMainVentStack === true) ||
+        /building drain|main drain/i.test(String(run.name ?? ''))
+      const servesWaterCloset = Boolean(
+        srcNode?.type === 'plumbing:fixture' && srcNode.fixtureKind === 'water-closet',
+      )
+      const levelWcCount = wcCountByLevel.get(runLevelKey) ?? 0
+      if (isMainBuildingDrain && (dfuLoad > 0 || levelWcCount > 0)) {
+        const rawSlopeInPerFt =
+          typeof run.slopeInPerFt === 'number' && run.slopeInPerFt > 0
+            ? run.slopeInPerFt
+            : (slopeInfo?.overallSlopeInPerFt ?? 0.25)
+        const effectiveSlope: 0.125 | 0.25 | 0.5 =
+          rawSlopeInPerFt < 0.25 ? 0.125 : rawSlopeInPerFt >= 0.5 ? 0.5 : 0.25
+        const drainSizing = sizeBuildingDrain({
+          totalDfu: dfuLoad,
+          slopeInPerFt: effectiveSlope,
+          hasWaterCloset: levelWcCount > 0,
+          waterClosetCount: levelWcCount,
+          codeEdition,
+        })
+        if (comparePipeSizes(size, drainSizing.recommendedSize) < 0 || dfuLoad > drainSizing.maxAllowedDfuAtSize) {
+          push({
+            severity: 'error',
+            codeRef: drainSizing.codeRef,
+            title: `Building drain (${size}) undersized for ${dfuLoad} DFU`,
+            detail: `${run.name ?? run.id} (${size} carrying ${dfuLoad} DFU${levelWcCount > 0 ? `, ${levelWcCount} WC(s)` : ''}) requires at least ${drainSizing.recommendedSize} (max ${drainSizing.maxAllowedDfuAtSize} DFU).`,
+            suggestedFix: `Upsize building drain to at least ${drainSizing.recommendedSize} per ${drainSizing.codeRef}.`,
+            nodeIds: [run.id],
+          })
+        }
+      } else if (!isMainBuildingDrain && (dfuLoad > 0 || servesWaterCloset)) {
+        const drainSizing = sizeDrainBranch({
+          dfu: dfuLoad,
+          hasWaterCloset: servesWaterCloset,
+          waterClosetCount: servesWaterCloset ? 1 : 0,
+          codeEdition,
+        })
+        if (comparePipeSizes(size, drainSizing.recommendedSize) < 0 || dfuLoad > drainSizing.maxAllowedDfuAtSize) {
+          push({
+            severity: 'error',
+            codeRef: drainSizing.codeRef,
+            title: servesWaterCloset && comparePipeSizes(size, '3"') < 0
+              ? `Water closet drain (${size}) below 3" minimum`
+              : `DWV drain branch (${size}) undersized for ${dfuLoad} DFU`,
+            detail: `${run.name ?? run.id} (${size}, ${dfuLoad} DFU${servesWaterCloset ? ', serves water closet' : ''}) requires at least ${drainSizing.recommendedSize}.`,
+            suggestedFix: `Upsize horizontal drain branch to at least ${drainSizing.recommendedSize} per ${drainSizing.codeRef}.`,
+            nodeIds: [run.id],
+          })
+        }
+      }
+
       const minSlope = getMinRequiredDrainSlopeInPerFt(size)
-      if (path.length >= 2) {
-        const slopeInfo = measureDrainPathSlope(path)
+      if (slopeInfo) {
         if (slopeInfo.hasUphillSegment) {
           push({
             severity: 'error',
@@ -442,12 +524,25 @@ export function auditScenePlumbing(
       const btuh = typeof run.gasBtuh === 'number' ? run.gasBtuh : 0
       if (btuh > 0) {
         const gasMat = material === 'csst' ? 'csst' : 'black-iron'
+        const runLenFt = Math.max(10, lengthFt)
         const sizing = sizeFuelGasPipe({
           totalBtuh: btuh,
-          longestRunFt: Math.max(10, lengthFt),
+          longestRunFt: runLenFt,
           material: gasMat,
         })
-        if (comparePipeSizes(size, sizing.recommendedSize) < 0) {
+        if (!sizing.ok) {
+          push({
+            severity: 'error',
+            codeRef: sizing.codeRef,
+            title:
+              runLenFt > 200
+                ? `Fuel gas run (${round2(lengthFt)} ft) exceeds 200 ft IFGC table limit`
+                : `Fuel gas load (${Math.round(btuh / 1000)} kBTU/hr) exceeds max ${gasMat} table capacity`,
+            detail: `${run.name ?? run.id} (${round2(lengthFt)} ft ${gasMat}) exceeds ${sizing.codeRef} limits (max ${Math.round(sizing.capacityBtuh / 1000)} kBTU/hr ${runLenFt > 200 ? 'at <= 200 ft' : `at ${round2(runLenFt)} ft`}).`,
+            suggestedFix: 'Shorten gas piping run, switch to higher-capacity material/size, or design a 2 psi system with line regulators per IFGC 402.4.',
+            nodeIds: [run.id],
+          })
+        } else if (comparePipeSizes(size, sizing.recommendedSize) < 0) {
           push({
             severity: 'error',
             codeRef: sizing.codeRef,

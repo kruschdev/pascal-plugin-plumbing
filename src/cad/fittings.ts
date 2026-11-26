@@ -92,12 +92,16 @@ export function buildFittingCad(kind: FittingCadKind): Group {
     case 'ball-valve': {
       add(new Mesh(new CylinderGeometry(0.022, 0.022, 0.10, 16), pool.brass), 0, 0, 0).rotation.z = Math.PI / 2
       add(new Mesh(new SphereGeometry(0.028, 16, 12), pool.brass), 0, 0, 0)
+      // Vertical brass stem connecting ball-valve body solidly to quarter-turn lever handle
+      add(new Mesh(new CylinderGeometry(0.007, 0.007, 0.028, 12), pool.brass), 0, 0.032, 0)
       add(new Mesh(new BoxGeometry(0.11, 0.012, 0.02), pool.pexColdBlue), 0.04, 0.045, 0)
       break
     }
     case 'angle-stop': {
       add(new Mesh(new CylinderGeometry(0.014, 0.014, 0.06, 14), pool.chrome), 0, 0, 0).rotation.x = Math.PI / 2
       add(new Mesh(new CylinderGeometry(0.012, 0.012, 0.05, 14), pool.chrome), 0, 0.025, 0.02)
+      // Stem connecting stop body solidly to oval quarter-turn handle
+      add(new Mesh(new CylinderGeometry(0.006, 0.006, 0.024, 12), pool.chrome), 0, 0, 0.034).rotation.x = Math.PI / 2
       add(new Mesh(new CylinderGeometry(0.022, 0.018, 0.015, 14), pool.chrome), 0, 0, 0.045).rotation.x = Math.PI / 2
       break
     }
@@ -108,11 +112,12 @@ export function buildFittingCad(kind: FittingCadKind): Group {
       break
     }
     case 'gas-drip-leg': {
-      // IFGC 408.4 tee + vertical 4" sediment trap nipple + cap + yellow shutoff handle
+      // IFGC 408.4 tee + vertical 4" sediment trap nipple + cap + yellow shutoff valve & handle
       add(new Mesh(new CylinderGeometry(0.018, 0.018, 0.24, 14), pool.blackIron), 0, 0, 0)
       add(new Mesh(new CylinderGeometry(0.024, 0.024, 0.03, 14), pool.blackIron), 0, -0.13, 0)
       add(new Mesh(new CylinderGeometry(0.018, 0.018, 0.14, 14), pool.blackIron), 0.07, 0.03, 0).rotation.z = Math.PI / 2
-      add(new Mesh(new BoxGeometry(0.08, 0.014, 0.02), pool.csstYellow), -0.02, 0.08, 0.03)
+      add(new Mesh(new CylinderGeometry(0.023, 0.023, 0.045, 14), pool.brass), 0, 0.08, 0)
+      add(new Mesh(new BoxGeometry(0.08, 0.014, 0.02), pool.csstYellow), -0.02, 0.08, 0.026)
       break
     }
     case 'pipe-hanger-clevis': {

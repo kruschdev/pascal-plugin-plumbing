@@ -1,5 +1,5 @@
 /**
- * 14 Clean-Room MIT Procedural 3D CAD Builders for Residential & Commercial Plumbing Fixtures.
+ * 18 Clean-Room MIT Procedural 3D CAD Builders for Residential & Commercial Plumbing Fixtures.
  * Zero React or `@pascal-app/editor` imports.
  */
 
@@ -23,13 +23,14 @@ export function buildFixtureCad(params: { fixtureKind: FixtureKind }): Group {
 
   switch (fixtureKind) {
     case 'water-closet': {
-      // Base pedestal, elongated bowl, rear tank, chrome flush lever, cold supply stub
+      // Base pedestal, elongated bowl, rear bowl-to-tank deck bridge, tank, chrome flush lever, cold supply riser
       add(new Mesh(new CylinderGeometry(0.14, 0.17, 0.36, 20), pool.porcelain), 0, 0.18, 0.06)
       add(new Mesh(new CylinderGeometry(0.19, 0.15, 0.12, 22), pool.porcelain), 0, 0.38, 0.12)
+      add(new Mesh(new BoxGeometry(0.24, 0.10, 0.18), pool.porcelain), 0, 0.38, -0.08)
       add(new Mesh(new BoxGeometry(0.40, 0.38, 0.19), pool.porcelain), 0, 0.56, -0.18)
       add(new Mesh(new BoxGeometry(0.42, 0.03, 0.21), pool.porcelain), 0, 0.76, -0.18)
       add(new Mesh(new BoxGeometry(0.06, 0.015, 0.02), pool.chrome), -0.15, 0.68, -0.075)
-      add(new Mesh(new CylinderGeometry(0.010, 0.010, 0.26, 10), pool.chrome), -0.14, 0.22, -0.26)
+      add(new Mesh(new CylinderGeometry(0.010, 0.010, 0.29, 10), pool.chrome), -0.14, 0.245, -0.21)
       break
     }
 
@@ -37,16 +38,18 @@ export function buildFixtureCad(params: { fixtureKind: FixtureKind }): Group {
     case 'bar-sink': {
       const w = fixtureKind === 'bar-sink' ? 0.46 : 0.60
       const d = fixtureKind === 'bar-sink' ? 0.44 : 0.48
-      // Counter/basin deck + faucet + chrome P-trap & dual angle stops beneath
+      // Counter/basin deck + faucet + chrome P-trap & dual supply risers connected solidly to underside
       add(new Mesh(new BoxGeometry(w, 0.08, d), pool.porcelain), 0, 0.80, 0)
       add(new Mesh(new CylinderGeometry(0.14, 0.10, 0.16, 20), pool.porcelain), 0, 0.70, 0.02)
       add(new Mesh(new CylinderGeometry(0.016, 0.018, 0.14, 12), pool.chrome), 0, 0.89, -d * 0.34)
-      add(new Mesh(new CylinderGeometry(0.012, 0.012, 0.10, 12), pool.chrome), 0, 0.94, -d * 0.22).rotation.x = Math.PI / 2
-      // Under-sink P-trap & H/C supplies
+      add(new Mesh(new CylinderGeometry(0.012, 0.012, 0.12, 12), pool.chrome), 0, 0.94, -d * 0.22).rotation.x = Math.PI / 2
+      // Under-sink drain tailpiece, oriented YZ P-trap U-bend, trap arm, and H/C supply risers up to counter deck
       add(new Mesh(new CylinderGeometry(0.020, 0.020, 0.26, 12), pool.pvcWhite), 0, 0.50, 0)
-      add(new Mesh(new TorusGeometry(0.045, 0.019, 10, 16, Math.PI), pool.pvcWhite), 0, 0.37, -0.045).rotation.x = Math.PI
-      add(new Mesh(new CylinderGeometry(0.009, 0.009, 0.34, 8), pool.pexHotRed), -0.10, 0.56, -0.14)
-      add(new Mesh(new CylinderGeometry(0.009, 0.009, 0.34, 8), pool.pexColdBlue), 0.10, 0.56, -0.14)
+      const pTrap = add(new Mesh(new TorusGeometry(0.045, 0.019, 10, 16, Math.PI), pool.pvcWhite), 0, 0.37, -0.045)
+      pTrap.rotation.set(Math.PI, Math.PI / 2, 0)
+      add(new Mesh(new CylinderGeometry(0.019, 0.019, 0.10, 12), pool.pvcWhite), 0, 0.37, -0.14).rotation.x = Math.PI / 2
+      add(new Mesh(new CylinderGeometry(0.009, 0.009, 0.40, 8), pool.pexHotRed), -0.10, 0.59, -0.14)
+      add(new Mesh(new CylinderGeometry(0.009, 0.009, 0.40, 8), pool.pexColdBlue), 0.10, 0.59, -0.14)
       break
     }
 
@@ -59,7 +62,7 @@ export function buildFixtureCad(params: { fixtureKind: FixtureKind }): Group {
       // High-arc gooseneck faucet
       add(new Mesh(new CylinderGeometry(0.018, 0.022, 0.24, 14), pool.chrome), 0, 1.01, -0.21)
       add(new Mesh(new TorusGeometry(0.08, 0.014, 10, 18, Math.PI), pool.chrome), 0, 1.13, -0.13).rotation.y = Math.PI / 2
-      // Drain tailpiece & P-trap
+      // Drain tailpiece & H/C supply risers
       add(new Mesh(new CylinderGeometry(0.024, 0.024, 0.28, 12), pool.pvcWhite), 0, 0.52, 0)
       add(new Mesh(new CylinderGeometry(0.010, 0.010, 0.36, 8), pool.pexHotRed), -0.12, 0.58, -0.16)
       add(new Mesh(new CylinderGeometry(0.010, 0.010, 0.36, 8), pool.pexColdBlue), 0.12, 0.58, -0.16)
@@ -70,13 +73,19 @@ export function buildFixtureCad(params: { fixtureKind: FixtureKind }): Group {
     case 'tub-shower-combo': {
       add(new Mesh(new BoxGeometry(1.52, 0.46, 0.76), pool.porcelain), 0, 0.23, 0)
       add(new Mesh(new BoxGeometry(1.36, 0.34, 0.60), pool.enamelSteel), 0, 0.31, 0)
-      // Tub spout & mixing valve at head end
-      add(new Mesh(new CylinderGeometry(0.055, 0.055, 0.025, 16), pool.chrome), -0.74, 0.86, 0).rotation.z = Math.PI / 2
-      add(new Mesh(new CylinderGeometry(0.018, 0.018, 0.12, 12), pool.chrome), -0.68, 0.62, 0).rotation.z = Math.PI / 2
+      // Continuous vertical copper rough-in riser tying tub deck -> tub spout -> mixing valve (-> shower arm)
       if (fixtureKind === 'tub-shower-combo') {
-        // Shower riser & head
-        add(new Mesh(new CylinderGeometry(0.012, 0.012, 1.15, 10), pool.copper), -0.76, 1.42, 0)
-        add(new Mesh(new CylinderGeometry(0.045, 0.025, 0.06, 16), pool.chrome), -0.64, 1.96, 0).rotation.z = -Math.PI / 4
+        add(new Mesh(new CylinderGeometry(0.012, 0.012, 1.76, 10), pool.copper), -0.75, 1.12, 0)
+      } else {
+        add(new Mesh(new CylinderGeometry(0.012, 0.012, 0.66, 10), pool.copper), -0.75, 0.57, 0)
+      }
+      // Mixing valve trim & tub spout at head end
+      add(new Mesh(new CylinderGeometry(0.055, 0.055, 0.025, 16), pool.chrome), -0.74, 0.86, 0).rotation.z = Math.PI / 2
+      add(new Mesh(new CylinderGeometry(0.018, 0.018, 0.14, 12), pool.chrome), -0.69, 0.62, 0).rotation.z = Math.PI / 2
+      if (fixtureKind === 'tub-shower-combo') {
+        // Horizontal chrome shower arm + angled shower head
+        add(new Mesh(new CylinderGeometry(0.011, 0.011, 0.15, 10), pool.chrome), -0.69, 1.98, 0).rotation.z = Math.PI / 2
+        add(new Mesh(new CylinderGeometry(0.045, 0.025, 0.06, 16), pool.chrome), -0.63, 1.96, 0).rotation.z = -Math.PI / 4
       }
       break
     }
@@ -84,9 +93,11 @@ export function buildFixtureCad(params: { fixtureKind: FixtureKind }): Group {
     case 'shower': {
       add(new Mesh(new BoxGeometry(0.96, 0.10, 0.96), pool.porcelain), 0, 0.05, 0)
       add(new Mesh(new CylinderGeometry(0.055, 0.055, 0.02, 16), pool.chrome), 0, 0.105, 0)
-      add(new Mesh(new CylinderGeometry(0.014, 0.014, 1.10, 12), pool.copper), 0, 1.40, -0.45)
+      // Full-height rough-in riser from shower base up to shower arm & head
+      add(new Mesh(new CylinderGeometry(0.014, 0.014, 1.94, 12), pool.copper), 0, 1.03, -0.45)
       add(new Mesh(new CylinderGeometry(0.06, 0.06, 0.025, 18), pool.chrome), 0, 1.15, -0.43).rotation.x = Math.PI / 2
-      add(new Mesh(new CylinderGeometry(0.055, 0.024, 0.06, 16), pool.chrome), 0, 1.98, -0.34).rotation.x = Math.PI / 4
+      add(new Mesh(new CylinderGeometry(0.011, 0.011, 0.14, 10), pool.chrome), 0, 1.99, -0.39).rotation.x = Math.PI / 2
+      add(new Mesh(new CylinderGeometry(0.055, 0.024, 0.06, 16), pool.chrome), 0, 1.97, -0.33).rotation.x = Math.PI / 4
       break
     }
 
@@ -145,6 +156,8 @@ export function buildFixtureCad(params: { fixtureKind: FixtureKind }): Group {
     case 'mop-sink': {
       add(new Mesh(new BoxGeometry(0.61, 0.28, 0.61), pool.porcelain), 0, 0.14, 0)
       add(new Mesh(new CylinderGeometry(0.045, 0.045, 0.02, 14), pool.chrome), 0, 0.05, 0)
+      // Stainless wall guard backing connecting basin rim up to service faucet body
+      add(new Mesh(new BoxGeometry(0.32, 0.48, 0.02), pool.galvanizedSteel), 0, 0.50, -0.30)
       add(new Mesh(new BoxGeometry(0.22, 0.06, 0.08), pool.chrome), 0, 0.68, -0.28)
       break
     }

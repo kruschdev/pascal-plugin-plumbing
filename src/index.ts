@@ -39,37 +39,37 @@ export const plumbingInspectorExtensions: InspectorExtension[] = [
   },
 ]
 
-export const plumbingEquipmentDefinition = {
+export const plumbingEquipmentDefinition: AnyNodeDefinition = {
   ...plumbingEquipmentRenderDefinition,
   snapProfile: 'item' as const,
   parametrics: plumbingEquipmentParametrics,
-}
+} as unknown as AnyNodeDefinition
 
-export const plumbingManifoldDefinition = {
+export const plumbingManifoldDefinition: AnyNodeDefinition = {
   ...plumbingManifoldRenderDefinition,
   snapProfile: 'item' as const,
   parametrics: plumbingManifoldParametrics,
-}
+} as unknown as AnyNodeDefinition
 
-export const plumbingFixtureDefinition = {
+export const plumbingFixtureDefinition: AnyNodeDefinition = {
   ...plumbingFixtureRenderDefinition,
   snapProfile: 'item' as const,
   parametrics: plumbingFixtureParametrics,
-}
+} as unknown as AnyNodeDefinition
 
-export const plumbingPipeRunDefinition = {
+export const plumbingPipeRunDefinition: AnyNodeDefinition = {
   ...plumbingPipeRunRenderDefinition,
   snapProfile: 'structural' as const,
   parametrics: plumbingPipeRunParametrics,
-}
+} as unknown as AnyNodeDefinition
 
 export const plumbingPlugin: Plugin = {
   ...plumbingRenderPlugin,
   nodes: [
-    plumbingEquipmentDefinition as unknown as AnyNodeDefinition,
-    plumbingManifoldDefinition as unknown as AnyNodeDefinition,
-    plumbingFixtureDefinition as unknown as AnyNodeDefinition,
-    plumbingPipeRunDefinition as unknown as AnyNodeDefinition,
+    plumbingEquipmentDefinition,
+    plumbingManifoldDefinition,
+    plumbingFixtureDefinition,
+    plumbingPipeRunDefinition,
   ],
   inspectorExtensions: plumbingInspectorExtensions,
 }
@@ -110,6 +110,8 @@ export const plumbingChatExtension: PluginChatExtension = {
     plumbing_audit_ipc: () => import('./ui/chat-card'),
     plumbing_generate_schedule: () => import('./ui/chat-card'),
     plumbing_route_pipe: () => import('./ui/chat-card'),
+    plumbing_calculate_loads: () => import('./ui/chat-card'),
+    plumbing_autopopulate: () => import('./ui/chat-card'),
   },
   actions: [
     {

@@ -4,7 +4,7 @@
 
 ## Hazards and Non-Negotiable Invariants
 
-1. **Trade-Priority Right-of-Way**: Plumbing (`plumbing:pipe-run`, gravity DWV) holds Priority #2 MEP right-of-way (`1. Structural -> 2. Plumbing -> 3. HVAC -> 4. Electrical`). Plumbing yields ONLY to Structural (`beam`, `column`, `stair`, wall openings, `IRC R602.6` stud boring limits) and honors `NEC 110.26(E)` Dedicated Electrical Space above `electrical:panel` and `electrical:transformer` nodes.
+1. **Trade-Priority Right-of-Way**: Plumbing (`plumbing:pipe-run`, gravity DWV) holds Priority #2 MEP right-of-way (`1. Structural -> 2. Plumbing -> 3. HVAC -> 4. Electrical`). Plumbing yields ONLY to Structural (`structural:beam`, `structural:column`, `beam`, `column`, plus `IRC R602.6` wall stud/plate boring limits; note `stair`, `window`, `door`, and `IRC R502.8` floor-joist boring are not yet extracted as 3D obstacles/penetrations) and honors `NEC 110.26(E)` Dedicated Electrical Space above `electrical:panel` and `electrical:transformer` nodes.
 2. **Entry Boundary Gates (`bun run check:render`)**:
    - `./render` (`src/render.ts`) MUST remain 100% free of `@pascal-app/editor` and `next` imports.
    - `./cad` (`src/cad/index.ts`) MUST remain 100% free of React and `@pascal-app/editor` imports.
@@ -20,5 +20,5 @@
 ```bash
 bun install
 bun run check          # tsc --noEmit + bun test src + 5/5 entry boundary gates + dist/ build
-bun run export:cad     # Regenerate all 42 binary .glb CAD models in assets/cad/
+bun run export:cad     # Regenerate all 47 binary .glb CAD models in assets/cad/
 ```

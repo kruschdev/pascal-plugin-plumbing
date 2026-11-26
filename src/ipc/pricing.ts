@@ -90,6 +90,104 @@ const FIXTURE_ROUGH_PRICES: Readonly<Record<FixtureKind, { mat: number; hrs: num
   'grease-interceptor': { mat: 1150, hrs: 6.0 },
 }
 
+const PEX_ROLL_PRICE_BY_SIZE: Readonly<Record<PipeNominalSize, number>> = {
+  '3/8"': 52,
+  '1/2"': 62,
+  '3/4"': 95,
+  '1"': 145,
+  '1-1/4"': 215,
+  '1-1/2"': 295,
+  '2"': 440,
+  '2-1/2"': 620,
+  '3"': 840,
+  '4"': 1250,
+  '6"': 2100,
+}
+
+const COPPER_STICK_PRICE_BY_SIZE: Readonly<Record<PipeNominalSize, number>> = {
+  '3/8"': 42,
+  '1/2"': 54,
+  '3/4"': 86,
+  '1"': 128,
+  '1-1/4"': 176,
+  '1-1/2"': 235,
+  '2"': 345,
+  '2-1/2"': 490,
+  '3"': 660,
+  '4"': 1020,
+  '6"': 1850,
+}
+
+const DWV_PLASTIC_STICK_PRICE_BY_SIZE: Readonly<Record<PipeNominalSize, number>> = {
+  '3/8"': 8,
+  '1/2"': 9,
+  '3/4"': 10,
+  '1"': 11,
+  '1-1/4"': 11.5,
+  '1-1/2"': 12,
+  '2"': 16,
+  '2-1/2"': 22,
+  '3"': 28,
+  '4"': 42,
+  '6"': 86,
+}
+
+const CAST_IRON_STICK_PRICE_BY_SIZE: Readonly<Record<PipeNominalSize, number>> = {
+  '3/8"': 48,
+  '1/2"': 52,
+  '3/4"': 56,
+  '1"': 60,
+  '1-1/4"': 64,
+  '1-1/2"': 68,
+  '2"': 74,
+  '2-1/2"': 84,
+  '3"': 92,
+  '4"': 125,
+  '6"': 215,
+}
+
+const BLACK_IRON_STICK_PRICE_BY_SIZE: Readonly<Record<PipeNominalSize, number>> = {
+  '3/8"': 28,
+  '1/2"': 36,
+  '3/4"': 48,
+  '1"': 68,
+  '1-1/4"': 94,
+  '1-1/2"': 118,
+  '2"': 162,
+  '2-1/2"': 225,
+  '3"': 295,
+  '4"': 420,
+  '6"': 720,
+}
+
+const CSST_ROLL_PRICE_BY_SIZE: Readonly<Record<PipeNominalSize, number>> = {
+  '3/8"': 135,
+  '1/2"': 165,
+  '3/4"': 225,
+  '1"': 310,
+  '1-1/4"': 420,
+  '1-1/2"': 540,
+  '2"': 720,
+  '2-1/2"': 920,
+  '3"': 1150,
+  '4"': 1550,
+  '6"': 2400,
+}
+
+const CPVC_STICK_PRICE_BY_SIZE: Readonly<Record<PipeNominalSize, number>> = {
+  '3/8"': 12,
+  '1/2"': 14,
+  '3/4"': 20,
+  '1"': 30,
+  '1-1/4"': 42,
+  '1-1/2"': 56,
+  '2"': 78,
+  '2-1/2"': 115,
+  '3"': 155,
+  '4"': 225,
+  '6"': 390,
+}
+
 function pipeUnitPricing(material: PipeMaterial, size: PipeNominalSize): {
   unit: string
   unitFt: number
@@ -97,27 +195,35 @@ function pipeUnitPricing(material: PipeMaterial, size: PipeNominalSize): {
   hrsPer100Ft: number
 } {
   if (material === 'pex-a' || material === 'pex-b') {
-    const mat = size === '1"' ? 145 : size === '3/4"' ? 95 : 62
+    const mat = PEX_ROLL_PRICE_BY_SIZE[size] ?? 95
     return { unit: '100 ft roll', unitFt: 100, matPerUnit: mat, hrsPer100Ft: 3.2 }
   }
   if (material === 'copper-l' || material === 'copper-m') {
-    const mat = size === '1"' ? 128 : size === '3/4"' ? 86 : 54
+    const mat = COPPER_STICK_PRICE_BY_SIZE[size] ?? 86
     return { unit: '20 ft stick', unitFt: 20, matPerUnit: mat, hrsPer100Ft: 7.5 }
   }
   if (material === 'pvc-dwv' || material === 'abs-dwv') {
-    const mat = size === '4"' ? 42 : size === '3"' ? 28 : size === '2"' ? 16 : 12
+    const mat = DWV_PLASTIC_STICK_PRICE_BY_SIZE[size] ?? 28
     return { unit: '10 ft stick', unitFt: 10, matPerUnit: mat, hrsPer100Ft: 5.5 }
   }
   if (material === 'cast-iron') {
-    const mat = size === '4"' ? 125 : size === '3"' ? 92 : 68
+    const mat = CAST_IRON_STICK_PRICE_BY_SIZE[size] ?? 92
     return { unit: '10 ft stick', unitFt: 10, matPerUnit: mat, hrsPer100Ft: 9.0 }
   }
   if (material === 'black-iron' || material === 'csst') {
-    const mat = material === 'csst' ? 165 : size === '1"' ? 68 : size === '3/4"' ? 48 : 36
+    const mat =
+      material === 'csst'
+        ? (CSST_ROLL_PRICE_BY_SIZE[size] ?? 225)
+        : (BLACK_IRON_STICK_PRICE_BY_SIZE[size] ?? 48)
     const unitFt = material === 'csst' ? 50 : 10
     return { unit: `${unitFt} ft`, unitFt, matPerUnit: mat, hrsPer100Ft: material === 'csst' ? 4.0 : 8.5 }
   }
-  return { unit: '10 ft stick', unitFt: 10, matPerUnit: 24, hrsPer100Ft: 4.5 }
+  if (material === 'cpvc') {
+    const mat = CPVC_STICK_PRICE_BY_SIZE[size] ?? 24
+    return { unit: '10 ft stick', unitFt: 10, matPerUnit: mat, hrsPer100Ft: 4.5 }
+  }
+  const rigidMat = size === '6"' ? 42 : size === '4"' ? 28 : 22
+  return { unit: '10 ft stick', unitFt: 10, matPerUnit: rigidMat, hrsPer100Ft: 4.5 }
 }
 
 /**
@@ -222,11 +328,17 @@ export function buildPlumbingBom(
 
   // 5. Fittings, Hangers, P-Traps, Cleanouts, Angle Stops & Consumables
   const fixTotal = schedule.fixtures.length
+  const dwvFixtureCount = schedule.fixtures.filter((f) => f.drainSize !== null || f.dfu > 0).length
+  const supplyFixtureCount = schedule.fixtures.filter((f) => f.supplySize !== null || f.wsfuTotal > 0).length
+  const hasDwvScope = totalDwvFt > 0 || dwvFixtureCount > 0
+  const hasSupplyScope = totalSupplyFt > 0 || supplyFixtureCount > 0
   if (fixTotal > 0 || totalPipeFt > 0) {
     const pTraps = all.filter((n) => n.type === 'plumbing:fixture' && n.hasPTrap !== false && n.drainSize).length
-    const cleanouts = Math.max(2, all.filter((n) => n.type === 'plumbing:pipe-run' && n.hasCleanout).length)
-    const dwvFittings = Math.ceil(fixTotal * 3 + totalDwvFt / 10)
-    const supplyFittings = Math.ceil(fixTotal * 4 + totalSupplyFt / 15)
+    const cleanouts = hasDwvScope
+      ? Math.max(2, all.filter((n) => n.type === 'plumbing:pipe-run' && n.hasCleanout).length)
+      : 0
+    const dwvFittings = hasDwvScope ? Math.ceil(dwvFixtureCount * 3 + totalDwvFt / 10) : 0
+    const supplyFittings = hasSupplyScope ? Math.ceil(supplyFixtureCount * 4 + totalSupplyFt / 15) : 0
     const hangers = Math.ceil(totalPipeFt / 4)
     const NO_ANGLE_STOP_FIXTURES = new Set<FixtureKind>([
       'bathtub',

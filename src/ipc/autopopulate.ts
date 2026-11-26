@@ -165,6 +165,9 @@ function inferFixtureKindFromPascalItem(node: SceneNodeLike): FixtureKind | null
   if (/toilet|water.?closet|\bwc\b/.test(hay)) return 'water-closet'
   if (/urinal/.test(hay)) return 'urinal'
   if (/bidet/.test(hay)) return 'bidet'
+  if (/tub.*shower|shower.*tub|(?:bath|tub|shower).{0,16}combo|combo.{0,16}(?:bath|tub|shower)/.test(hay)) {
+    return 'tub-shower-combo'
+  }
   if (/bathtub|soaking.?tub|\btub\b/.test(hay)) return 'bathtub'
   if (/shower/.test(hay)) return 'shower'
   if (/kitchen.?sink/.test(hay)) return 'kitchen-sink'
@@ -265,15 +268,35 @@ export function planPlumbingAutoPopulate(
     dwvMaterial = 'pvc-dwv',
     foundationType = 'crawlspace',
     waterHeaterKind = 'water-heater-tank-electric',
-    includeFuelGas = waterHeaterKind === 'water-heater-tank-gas' ||
-      waterHeaterKind === 'water-heater-tankless-gas',
     includeDryerVent = true,
     includeHotRecirc = false,
     bonesMode = 'auto',
   } = options
 
+  const sceneGasAppliances: Array<{ id: string; name: string; pos: Vec3; btuh: number }> = []
+  for (const n of Object.values(nodes)) {
+    if (!belongsToLevel(nodes, n, levelId)) continue
+    if (
+      (n.type === 'hvac:equipment' || (n.type === 'plumbing:equipment' && n.equipmentKind !== 'gas-meter')) &&
+      typeof n.gasBtuh === 'number' &&
+      n.gasBtuh > 0 &&
+      Array.isArray(n.position) &&
+      n.position.length >= 3
+    ) {
+      sceneGasAppliances.push({
+        id: n.id,
+        name: typeof n.name === 'string' && n.name ? n.name : n.id,
+        pos: [Number(n.position[0]), Math.max(0.45, Number(n.position[1]) + 0.45), Number(n.position[2])],
+        btuh: n.gasBtuh,
+      })
+    }
+  }
+  const hasGasWaterHeater =
+    waterHeaterKind === 'water-heater-tank-gas' || waterHeaterKind === 'water-heater-tankless-gas'
+  const includeFuelGas = options.includeFuelGas ?? (hasGasWaterHeater || sceneGasAppliances.length > 0)
+
   const walls = extractWallSegments(nodes, levelId)
-  const rooms = extractRoomPolygons(nodes, levelId)
+  const rooms = extractRoomPolygons(nodes, levelId, occupancy)
   const levelH = resolveLevelHeightM(nodes, levelId)
   const obstacles = extractPlumbingObstacles(nodes, levelId)
   const bones =
@@ -696,6 +719,8 @@ export function planPlumbingAutoPopulate(
     from: waterEntryPos,
     to: [whPos[0], 1.55, whPos[2]],
     routingPlaneY: supplyPlaneY,
+    nominalSize: mainColdSized.size,
+    material: supplyMaterial,
     euclideanInCavity: false,
     obstacles,
   })
@@ -733,6 +758,8 @@ export function planPlumbingAutoPopulate(
       from: [whPos[0] + 0.1, 1.55, whPos[2]],
       to: [manifoldPos[0] - 0.12, manifoldPos[1], manifoldPos[2]],
       routingPlaneY: 1.65,
+      nominalSize: hotMainSized.size,
+      material: supplyMaterial,
       euclideanInCavity: false,
       obstacles,
     })
@@ -802,6 +829,8 @@ export function planPlumbingAutoPopulate(
         from: [whPos[0] + 0.08, 1.45, whPos[2]],
         to: [spineEndX, supplyPlaneY, spineEndZ],
         routingPlaneY: supplyPlaneY,
+        nominalSize: mainColdSized.size,
+        material: supplyMaterial,
         euclideanInCavity: false,
         obstacles,
       })
@@ -831,6 +860,8 @@ export function planPlumbingAutoPopulate(
           from: [whPos[0] - 0.08, 1.45, whPos[2]],
           to: [spineEndX, supplyPlaneY + 0.04, spineEndZ],
           routingPlaneY: supplyPlaneY + 0.04,
+          nominalSize: hotMainSized.size,
+          material: supplyMaterial,
           euclideanInCavity: false,
           obstacles,
         })
@@ -910,64 +941,19 @@ export function planPlumbingAutoPopulate(
   })
   const mainVentSizing = sizeVentStack({ totalDfu, isMainStack: true })
 
-  // Main 3"/4" Soil/Vent Stack (stack base -> through roof)
-  const stackBaseY = foundationType === 'slab' ? -0.45 : -0.34
+  // Allocate stack & building drain IDs first, route fixture branches to find lowest arrival invert
+  // so the Main Building Drain ALWAYS starts at or below every arriving branch drain invert!
+  const defaultStackBaseY = foundationType === 'slab' ? -0.45 : -0.34
   const stackId = nextPipeId()
-  pipeRuns.push({
-    id: stackId,
-    name: `${mainVentSizing.recommendedSize} Main DWV Soil & Vent Stack (Through Roof)`,
-    system: 'dwv-vent',
-    material: dwvMaterial,
-    nominalSize: mainVentSizing.recommendedSize,
-    path: [
-      [stackPt[0], stackBaseY, stackPt[1]],
-      [stackPt[0], round2(levelH + 0.45), stackPt[1]],
-    ],
-    slopeInPerFt: 0,
-    dfuLoad: round2(totalDfu),
-    wsfuLoad: 0,
-    gasBtuh: 0,
-    hasCleanout: true, // Stack-base cleanout per IPC 708.1
-    hasSedimentTrap: false,
-    hasShutoffWithin6Ft: false,
-    isHorizontalSanTee: false,
-    isMainVentStack: true,
-    wallId: stackNearWall?.wall.id,
-  })
-
-  // Main Building Drain (Stack Base -> Sewer Exit, 1/4"/ft slope, with cleanout)
-  const mainDrainRoute = routeDwvDrainRun({
-    from: [stackPt[0], stackBaseY, stackPt[1]],
-    to: sewerExitPos,
-    nominalSize: buildingDrainSizing.recommendedSize,
-    foundationType,
-    slopeInPerFt: 0.25,
-    obstacles,
-  })
-  pipeRuns.push({
-    id: nextPipeId(),
-    name: `${buildingDrainSizing.recommendedSize} Main Building Drain (${totalDfu} DFU -> Sewer Exit)`,
-    system: 'dwv-drain',
-    material: dwvMaterial,
-    nominalSize: buildingDrainSizing.recommendedSize,
-    path: mainDrainRoute.path,
-    slopeInPerFt: mainDrainRoute.slopeInPerFt,
-    dfuLoad: round2(totalDfu),
-    wsfuLoad: 0,
-    gasBtuh: 0,
-    sourceNodeId: stackId,
-    hasCleanout: true,
-    hasSedimentTrap: false,
-    hasShutoffWithin6Ft: false,
-    isHorizontalSanTee: false,
-    isMainVentStack: false,
-  })
+  const mainDrainId = nextPipeId()
 
   // Route every fixture's DWV branch, Re-Vent, Cold Supply, and Hot Supply
   const supplySourcePos: Vec3 = manifoldId ? manifoldPos : [whPos[0], 1.45, whPos[2]]
   const supplySourceId = manifoldId ?? whId
   let furthestHotFixture: PlannedFixtureSpec | null = null
   let maxHotDist = 0
+  let minBranchArrivalY = defaultStackBaseY
+  const branchPipeRuns: PlannedPipeRunSpec[] = []
 
   for (const fix of fixtures) {
     const spec = FIXTURE_SPECS[fix.fixtureKind]
@@ -982,14 +968,19 @@ export function planPlumbingAutoPopulate(
       })
       const dwvRoute = routeDwvDrainRun({
         from: fix.position,
-        to: [stackPt[0], stackBaseY, stackPt[1]],
+        to: [stackPt[0], defaultStackBaseY, stackPt[1]],
         nominalSize: branchSizing.recommendedSize,
+        material: dwvMaterial,
         foundationType,
         slopeInPerFt: 0.25,
         obstacles,
       })
+      const arrivalY = dwvRoute.path[dwvRoute.path.length - 1]?.[1]
+      if (typeof arrivalY === 'number' && arrivalY < minBranchArrivalY) {
+        minBranchArrivalY = arrivalY
+      }
       const trapArmFt = fix.ventSize ? 1.5 : dwvRoute.lengthFt
-      pipeRuns.push({
+      branchPipeRuns.push({
         id: nextPipeId(),
         name: `${branchSizing.recommendedSize} DWV Drain (${fix.name})`,
         system: 'dwv-drain',
@@ -1017,9 +1008,11 @@ export function planPlumbingAutoPopulate(
           stackPoint: stackPt,
           floodRimHeightM: spec.floodRimHeightM,
           ceilingHeightM: levelH,
+          nominalSize: fix.ventSize,
+          material: dwvMaterial,
           obstacles,
         })
-        pipeRuns.push({
+        branchPipeRuns.push({
           id: nextPipeId(),
           name: `${fix.ventSize} Re-Vent (${fix.name})`,
           system: 'dwv-vent',
@@ -1059,10 +1052,12 @@ export function planPlumbingAutoPopulate(
         from: coldOrigin,
         to: [fix.position[0] + 0.06, fix.position[1], fix.position[2]],
         routingPlaneY: supplyPlaneY,
+        nominalSize: coldSized.size,
+        material: supplyMaterial,
         euclideanInCavity: supplyTopology === 'manifold',
         obstacles,
       })
-      pipeRuns.push({
+      branchPipeRuns.push({
         id: nextPipeId(),
         name: `${coldSized.size} Cold ${supplyTopology === 'trunk-and-branch' ? 'Branch' : 'Supply'} (${fix.name})`,
         system: 'cold-water',
@@ -1100,6 +1095,8 @@ export function planPlumbingAutoPopulate(
         from: hotOrigin,
         to: [fix.position[0] - 0.06, fix.position[1], fix.position[2]],
         routingPlaneY: supplyPlaneY + 0.04,
+        nominalSize: hotSized.size,
+        material: supplyMaterial,
         euclideanInCavity: supplyTopology === 'manifold',
         obstacles,
       })
@@ -1108,7 +1105,7 @@ export function planPlumbingAutoPopulate(
         maxHotDist = distFromWh
         furthestHotFixture = fix
       }
-      pipeRuns.push({
+      branchPipeRuns.push({
         id: nextPipeId(),
         name: `${hotSized.size} Hot ${supplyTopology === 'trunk-and-branch' ? 'Branch' : 'Supply'} (${fix.name})`,
         system: 'hot-water',
@@ -1130,6 +1127,60 @@ export function planPlumbingAutoPopulate(
     }
   }
 
+  // Main 3"/4" Soil/Vent Stack (anchored at or below the lowest branch arrival invert -> through roof)
+  const stackBaseY = Math.floor(Math.min(defaultStackBaseY, minBranchArrivalY) * 10000) / 10000
+  pipeRuns.push({
+    id: stackId,
+    name: `${mainVentSizing.recommendedSize} Main DWV Soil & Vent Stack (Through Roof)`,
+    system: 'dwv-vent',
+    material: dwvMaterial,
+    nominalSize: mainVentSizing.recommendedSize,
+    path: [
+      [stackPt[0], stackBaseY, stackPt[1]],
+      [stackPt[0], round2(levelH + 0.45), stackPt[1]],
+    ],
+    slopeInPerFt: 0,
+    dfuLoad: round2(totalDfu),
+    wsfuLoad: 0,
+    gasBtuh: 0,
+    hasCleanout: true, // Stack-base cleanout per IPC 708.1
+    hasSedimentTrap: false,
+    hasShutoffWithin6Ft: false,
+    isHorizontalSanTee: false,
+    isMainVentStack: true,
+    wallId: stackNearWall?.wall.id,
+  })
+
+  // Main Building Drain (Stack Base -> Sewer Exit, 1/4"/ft slope, with cleanout)
+  const mainDrainRoute = routeDwvDrainRun({
+    from: [stackPt[0], stackBaseY, stackPt[1]],
+    to: sewerExitPos,
+    nominalSize: buildingDrainSizing.recommendedSize,
+    material: dwvMaterial,
+    foundationType,
+    slopeInPerFt: 0.25,
+    obstacles,
+  })
+  pipeRuns.push({
+    id: mainDrainId,
+    name: `${buildingDrainSizing.recommendedSize} Main Building Drain (${totalDfu} DFU -> Sewer Exit)`,
+    system: 'dwv-drain',
+    material: dwvMaterial,
+    nominalSize: buildingDrainSizing.recommendedSize,
+    path: mainDrainRoute.path,
+    slopeInPerFt: mainDrainRoute.slopeInPerFt,
+    dfuLoad: round2(totalDfu),
+    wsfuLoad: 0,
+    gasBtuh: 0,
+    sourceNodeId: stackId,
+    hasCleanout: true,
+    hasSedimentTrap: false,
+    hasShutoffWithin6Ft: false,
+    isHorizontalSanTee: false,
+    isMainVentStack: false,
+  })
+  pipeRuns.push(...branchPipeRuns)
+
   // 7. Optional Hot Water Recirculation Return Loop (for long hot runs > 40 ft or when requested)
   if (includeHotRecirc && furthestHotFixture) {
     const recircId = nextEqId()
@@ -1146,6 +1197,8 @@ export function planPlumbingAutoPopulate(
       from: furthestHotFixture.position,
       to: [round2(whPos[0] - 0.35), 1.25, round2(whPos[2])],
       routingPlaneY: supplyPlaneY + 0.08,
+      nominalSize: '1/2"',
+      material: supplyMaterial,
       euclideanInCavity: true,
       obstacles,
     })
@@ -1170,11 +1223,17 @@ export function planPlumbingAutoPopulate(
     })
   }
 
-  // 8. Optional IFGC Fuel Gas Distribution (Gas Meter -> Gas Water Heater)
-  if (includeFuelGas) {
+  // 8. Optional IFGC Fuel Gas Distribution (only route to actual gas appliances/furnaces; never into electric/HPWH WH!)
+  const gasTargets: Array<{ id: string; name: string; pos: Vec3; btuh: number }> = [
+    ...(hasGasWaterHeater && whSizing.gasBtuh > 0
+      ? [{ id: whId, name: 'Gas Water Heater', pos: [whPos[0], 0.65, whPos[2]] as Vec3, btuh: whSizing.gasBtuh }]
+      : []),
+    ...sceneGasAppliances,
+  ]
+  if (includeFuelGas && gasTargets.length > 0) {
     const gasMeterPos: Vec3 = [round2(bounds.minX - 0.15), 0.9, round2(whPos[2] + 0.8)]
     const gasMeterId = nextEqId()
-    const totalGasBtuh = Math.max(40000, whSizing.gasBtuh || 40000)
+    const totalGasBtuh = gasTargets.reduce((sum, t) => sum + t.btuh, 0)
     equipment.push({
       id: gasMeterId,
       name: `Natural Gas Meter (${Math.round(totalGasBtuh / 1000)} kBTU/hr)`,
@@ -1185,37 +1244,46 @@ export function planPlumbingAutoPopulate(
       gasBtuh: 0, // Supply meter, not an appliance load (prevents double-counting appliance BTU/hr)
       electricalDemand: null,
     })
-    const gasRoute = routePressurizedPipeRun({
-      from: gasMeterPos,
-      to: [whPos[0], 0.65, whPos[2]],
-      routingPlaneY: supplyPlaneY - 0.06,
-      euclideanInCavity: false,
-      obstacles,
-    })
-    const gasSizing = sizeFuelGasPipe({
-      totalBtuh: totalGasBtuh,
-      longestRunFt: Math.max(15, gasRoute.lengthFt),
-      material: 'black-iron',
-    })
-    pipeRuns.push({
-      id: nextPipeId(),
-      name: `${gasSizing.recommendedSize} Fuel Gas Line (${Math.round(totalGasBtuh / 1000)} kBTU/hr, IFGC 402.4)`,
-      system: 'fuel-gas',
-      material: 'black-iron',
-      nominalSize: gasSizing.recommendedSize,
-      path: gasRoute.path,
-      slopeInPerFt: 0,
-      dfuLoad: 0,
-      wsfuLoad: 0,
-      gasBtuh: totalGasBtuh,
-      sourceNodeId: gasMeterId,
-      targetNodeId: whId,
-      hasCleanout: false,
-      hasSedimentTrap: true,
-      hasShutoffWithin6Ft: true,
-      isHorizontalSanTee: false,
-      isMainVentStack: false,
-    })
+    for (const target of gasTargets) {
+      const prelimGasSizing = sizeFuelGasPipe({
+        totalBtuh: target.btuh,
+        longestRunFt: 40,
+        material: 'black-iron',
+      })
+      const gasRoute = routePressurizedPipeRun({
+        from: gasMeterPos,
+        to: target.pos,
+        routingPlaneY: supplyPlaneY - 0.06,
+        nominalSize: prelimGasSizing.recommendedSize,
+        material: 'black-iron',
+        euclideanInCavity: false,
+        obstacles,
+      })
+      const gasSizing = sizeFuelGasPipe({
+        totalBtuh: target.btuh,
+        longestRunFt: Math.max(15, gasRoute.lengthFt),
+        material: 'black-iron',
+      })
+      pipeRuns.push({
+        id: nextPipeId(),
+        name: `${gasSizing.recommendedSize} Fuel Gas Line (${target.name}, ${Math.round(target.btuh / 1000)} kBTU/hr, IFGC 402.4)`,
+        system: 'fuel-gas',
+        material: 'black-iron',
+        nominalSize: gasSizing.recommendedSize,
+        path: gasRoute.path,
+        slopeInPerFt: 0,
+        dfuLoad: 0,
+        wsfuLoad: 0,
+        gasBtuh: target.btuh,
+        sourceNodeId: gasMeterId,
+        targetNodeId: target.id,
+        hasCleanout: false,
+        hasSedimentTrap: true,
+        hasShutoffWithin6Ft: true,
+        isHorizontalSanTee: false,
+        isMainVentStack: false,
+      })
+    }
   }
 
   // 9. Optional IRC M1502.4 Rigid 4" Dryer Vent for Clothes Washer / Laundry
@@ -1240,6 +1308,8 @@ export function planPlumbingAutoPopulate(
         from: [washer.position[0], 0.35, washer.position[2]],
         to: exitPt,
         routingPlaneY: 0.35,
+        nominalSize: '4"',
+        material: 'rigid-aluminum',
         euclideanInCavity: false,
         obstacles,
       })

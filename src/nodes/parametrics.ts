@@ -17,6 +17,7 @@ export const plumbingEquipmentParametrics: ParametricDescriptor<PlumbingEquipmen
         { key: 'capacityGal', kind: 'number', unit: 'gal', min: 0, max: 500, step: 5 },
         { key: 'gasBtuh', kind: 'number', unit: 'BTU/h', min: 0, max: 500000, step: 5000 },
         { key: 'watts', kind: 'number', unit: 'W', min: 0, max: 50000, step: 500 },
+        { key: 'roomVolumeCuFt', kind: 'number', unit: 'cu ft', min: 0, max: 50000, step: 50, label: 'Room Volume (HPWH >= 700 cu ft)' },
       ],
     },
     {
@@ -84,6 +85,8 @@ export const plumbingPipeRunParametrics: ParametricDescriptor<PlumbingPipeRunNod
         { key: 'gasBtuh', kind: 'number', unit: 'BTU/h', min: 0, max: 2000000, step: 5000 },
         { key: 'hasCleanout', kind: 'boolean', label: 'Cleanout Installed (IPC 708.1)' },
         { key: 'hasSedimentTrap', kind: 'boolean', label: 'Gas Drip Leg (IFGC 408.4)' },
+        { key: 'isMainVentStack', kind: 'boolean', label: 'Main Vent Stack Through Roof (IPC 903.1)' },
+        { key: 'isHorizontalSanTee', kind: 'boolean', label: 'Horizontal Sanitary Tee (Flagged per IPC 706.3)' },
         { key: 'showFramingPenetrations', kind: 'boolean', label: 'Show 3D Stud Bore Rings & Nail Plates' },
       ],
     },

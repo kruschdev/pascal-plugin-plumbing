@@ -19,6 +19,7 @@ import {
   type EquipmentKind,
   FIXTURE_SPECS,
   type FixtureKind,
+  type ManifoldKind,
   PLUMBING_SYSTEM_COLORS,
   type PlumbingSystem,
 } from '../ipc/tables'
@@ -49,20 +50,49 @@ const QUICK_EQUIPMENT: ReadonlyArray<{ kind: EquipmentKind; label: string }> = [
   { kind: 'backwater-valve', label: 'Mainline Backwater Valve' },
 ]
 
+const QUICK_MANIFOLDS: ReadonlyArray<{ kind: ManifoldKind; label: string }> = [
+  { kind: 'pex-homerun', label: 'PEX Home-Run Manifold (12-Port)' },
+  { kind: 'copper-header', label: 'Type L Copper Header (12-Port)' },
+  { kind: 'gas-csst', label: 'CSST Fuel-Gas Manifold (8-Port)' },
+]
+
 const QUICK_FIXTURES: ReadonlyArray<{ kind: FixtureKind; label: string }> = [
   { kind: 'water-closet', label: 'Water Closet (3 DFU)' },
   { kind: 'lavatory', label: 'Vanity Lavatory (1 DFU)' },
   { kind: 'kitchen-sink', label: 'Kitchen Sink (2 DFU)' },
-  { kind: 'shower', label: 'Walk-In Shower (2 DFU)' },
   { kind: 'bathtub', label: 'Alcove Bathtub (2 DFU)' },
-  { kind: 'clothes-washer', label: 'Washer Box + 2" Standpipe' },
+  { kind: 'shower', label: 'Walk-In Shower (2 DFU)' },
+  { kind: 'tub-shower-combo', label: 'Tub / Shower Combo (2 DFU)' },
   { kind: 'dishwasher', label: 'Dishwasher Hookup (20A GFCI)' },
-  { kind: 'garbage-disposal', label: 'Garbage Disposal (20A GFCI)' },
+  { kind: 'clothes-washer', label: 'Washer Box + 2" Standpipe' },
+  { kind: 'laundry-sink', label: 'Laundry / Utility Sink (2 DFU)' },
+  { kind: 'bar-sink', label: 'Wet-Bar Sink (1 DFU)' },
+  { kind: 'floor-drain', label: '2" Floor Drain (2 DFU)' },
   { kind: 'hose-bibb', label: 'Frost-Proof Hose Bibb (Vacuum Breaker)' },
-  { kind: 'floor-drain', label: '2" Floor Drain' },
+  { kind: 'bidet', label: 'Heated Bidet (15A Dedicated GFCI)' },
+  { kind: 'garbage-disposal', label: 'Garbage Disposal (20A GFCI)' },
   { kind: 'urinal', label: 'Commercial Wall-Hung Urinal' },
   { kind: 'mop-sink', label: 'Commercial Mop Basin (3" Drain)' },
+  { kind: 'drinking-fountain', label: 'Commercial Drinking Fountain' },
+  { kind: 'grease-interceptor', label: 'Commercial Grease Interceptor (50 GPM)' },
 ]
+
+function defaultEquipmentPlacementY(kind: EquipmentKind): number {
+  switch (kind) {
+    case 'main-shutoff-prv':
+      return 0.75
+    case 'expansion-tank':
+      return 1.65
+    case 'recirc-pump':
+      return 1.25
+    case 'gas-meter':
+      return 0.9
+    case 'backwater-valve':
+      return 0.12
+    default:
+      return 0
+  }
+}
 
 export default function PlumbingHostPanel() {
   const nodes = useScene((s) => s.nodes)
@@ -99,6 +129,7 @@ export default function PlumbingHostPanel() {
   } = usePlumbingUi()
 
   const [selectedEq, setSelectedEq] = useState<EquipmentKind>('water-heater-hpwh')
+  const [selectedMan, setSelectedMan] = useState<ManifoldKind>('pex-homerun')
   const [selectedFix, setSelectedFix] = useState<FixtureKind>('water-closet')
   const [statusMsg, setStatusMsg] = useState<string | null>(null)
 
@@ -108,7 +139,10 @@ export default function PlumbingHostPanel() {
     () => auditScenePlumbing(record, { codeEdition, occupancy }),
     [record, codeEdition, occupancy],
   )
-  const schedule = useMemo(() => buildPlumbingSchedule(record, { codeEdition, occupancy }), [record, codeEdition, occupancy])
+  const schedule = useMemo(
+    () => buildPlumbingSchedule(record, { codeEdition, occupancy, supplyMaterial }),
+    [record, codeEdition, occupancy, supplyMaterial],
+  )
   const bones = useMemo(() => extractBonesPlumbingContext(record, levelId), [record, levelId])
 
   const unwiredPowerCount = schedule.electricalCoordination.filter((c) => !c.wired).length
@@ -175,9 +209,38 @@ export default function PlumbingHostPanel() {
       setStatusMsg('Create a building level first before placing equipment.')
       return
     }
+    const existingCount = Object.values(record).filter(
+      (n) => n.type === 'plumbing:equipment' && belongsToLevel(record, n, levelId),
+    ).length
+    const ox = Math.round((0.8 + (existingCount % 5) * 0.65) * 100) / 100
+    const oz = Math.round((0.8 + Math.floor(existingCount / 5) * 0.65) * 100) / 100
+    const oy = defaultEquipmentPlacementY(selectedEq)
     const outcome = plumbingAgentOperations.plumbing_place_equipment(
       nodes,
-      { levelId, equipmentKind: selectedEq, position: [0.8, 0, 0.8] },
+      { levelId, equipmentKind: selectedEq, position: [ox, oy, oz] },
+      { activeLevelId: levelId },
+    )
+    const created = outcome.changes?.create?.[0]
+    if (created) {
+      createNode(created.node, created.parentId as never)
+      setStatusMsg(`Placed ${String(outcome.result.name)}.`)
+    }
+  }
+
+  const placeManifold = () => {
+    if (!levelId) {
+      setStatusMsg('Create a building level first before placing manifolds.')
+      return
+    }
+    const existingCount = Object.values(record).filter(
+      (n) => n.type === 'plumbing:manifold' && belongsToLevel(record, n, levelId),
+    ).length
+    const ox = Math.round((1.0 + (existingCount % 5) * 0.6) * 100) / 100
+    const oz = Math.round((0.5 + Math.floor(existingCount / 5) * 0.6) * 100) / 100
+    const portCount = selectedMan === 'gas-csst' ? 8 : 12
+    const outcome = plumbingAgentOperations.plumbing_place_manifold(
+      nodes,
+      { levelId, manifoldKind: selectedMan, portCount, position: [ox, 1.35, oz] },
       { activeLevelId: levelId },
     )
     const created = outcome.changes?.create?.[0]
@@ -192,10 +255,15 @@ export default function PlumbingHostPanel() {
       setStatusMsg('Create a building level first before placing fixtures.')
       return
     }
+    const existingCount = Object.values(record).filter(
+      (n) => n.type === 'plumbing:fixture' && belongsToLevel(record, n, levelId),
+    ).length
+    const ox = Math.round((1.2 + (existingCount % 5) * 0.75) * 100) / 100
+    const oz = Math.round((1.2 + Math.floor(existingCount / 5) * 0.75) * 100) / 100
     const roughInY = FIXTURE_SPECS[selectedFix]?.roughInHeightM ?? 0.5
     const outcome = plumbingAgentOperations.plumbing_place_fixture(
       nodes,
-      { levelId, fixtureKind: selectedFix, position: [1.2, roughInY, 1.2], codeEdition },
+      { levelId, fixtureKind: selectedFix, position: [ox, roughInY, oz], codeEdition },
       { activeLevelId: levelId },
     )
     const created = outcome.changes?.create?.[0]
@@ -391,6 +459,18 @@ export default function PlumbingHostPanel() {
           </select>
           <button type="button" onClick={placeEquipment} style={ghostBtnStyle}>
             + Eq
+          </button>
+        </div>
+        <div style={{ display: 'flex', gap: 6 }}>
+          <select value={selectedMan} onChange={(e) => setSelectedMan(e.target.value as ManifoldKind)} style={{ ...selectStyle, flex: 1 }}>
+            {QUICK_MANIFOLDS.map((item) => (
+              <option key={item.kind} value={item.kind}>
+                {item.label}
+              </option>
+            ))}
+          </select>
+          <button type="button" onClick={placeManifold} style={ghostBtnStyle}>
+            + Man
           </button>
         </div>
         <div style={{ display: 'flex', gap: 6 }}>

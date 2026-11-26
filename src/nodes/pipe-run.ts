@@ -25,7 +25,7 @@ import {
   resolveNodeLevelId,
 } from '../ipc/framing-interop'
 import { extractWallSegments } from '../ipc/routing'
-import type { PipeMaterial, PipeNominalSize, PlumbingSystem } from '../ipc/tables'
+import { type PipeMaterial, type PipeNominalSize, type PlumbingSystem, getPipeOuterDiameterM } from '../ipc/tables'
 import { PipeNominalSizeEnum } from './fixture'
 
 const Vec3Schema = z.tuple([z.number(), z.number(), z.number()])
@@ -149,10 +149,12 @@ export function buildPlumbingPipeRunFloorplan(
   const stroke = selected && view?.palette ? view.palette.selectedStroke : meta.hex
   const children: FloorplanGeometry[] = []
 
+  let drewHorizontal = false
   for (let i = 0; i < node.path.length - 1; i++) {
     const a = node.path[i]!
     const b = node.path[i + 1]!
     if (Math.hypot(b[0] - a[0], b[2] - a[2]) < 1e-3) continue
+    drewHorizontal = true
     children.push({
       kind: 'line',
       x1: a[0],
@@ -166,6 +168,43 @@ export function buildPlumbingPipeRunFloorplan(
   }
 
   const start = node.path[0]
+  if (!drewHorizontal && start && node.path.length >= 2) {
+    // Pure vertical pipe stack (e.g., 3"/4" Main Vent Stack): render a visible 2D riser circle + crosshair
+    const odM = getPipeOuterDiameterM(node.nominalSize as PipeNominalSize, node.material as PipeMaterial)
+    const r = Math.max(0.085, (odM / 2) * 1.6)
+    const sw = selected ? 0.036 : 0.024
+    children.push(
+      {
+        kind: 'circle',
+        cx: start[0],
+        cy: start[2],
+        r,
+        fill: meta.hex,
+        fillOpacity: 0.22,
+        stroke,
+        strokeWidth: sw,
+      },
+      {
+        kind: 'line',
+        x1: start[0] - r * 0.85,
+        y1: start[2],
+        x2: start[0] + r * 0.85,
+        y2: start[2],
+        stroke,
+        strokeWidth: 0.018,
+      },
+      {
+        kind: 'line',
+        x1: start[0],
+        y1: start[2] - r * 0.85,
+        x2: start[0],
+        y2: start[2] + r * 0.85,
+        stroke,
+        strokeWidth: 0.018,
+      },
+    )
+  }
+
   if (selected && start) {
     children.push({ kind: 'move-handle', point: [start[0], start[2]] })
   }

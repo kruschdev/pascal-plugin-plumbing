@@ -16,6 +16,16 @@ export default function PlumbingChatCard({ toolName, output, state, actions }: C
         loads?: { totalDfu?: number; peakDemandGpm?: number; recommendedBuildingDrain?: string }
       }
     | undefined
+  const loadsObj = (data?.loads ?? scheduleObj?.loads) as
+    | {
+        totalDfu?: number
+        totalWsfu?: number
+        peakDemandGpm?: number
+        recommendedBuildingDrain?: string
+        recommendedVentStack?: string
+      }
+    | undefined
+  const autoSummary = typeof data?.summary === 'string' ? data.summary : null
   const bomObj = data?.bom as { grandTotalUsd?: number; totalLaborHours?: number } | undefined
   const penetrations = Array.isArray(data?.penetrations) ? data.penetrations : null
   const routedNodeId = typeof data?.nodeId === 'string' ? data.nodeId : null
@@ -39,6 +49,21 @@ export default function PlumbingChatCard({ toolName, output, state, actions }: C
         <span style={{ fontSize: 11, opacity: 0.75 }}>{state}</span>
       </div>
       {output?.text && <div style={{ opacity: 0.85 }}>{output.text}</div>}
+
+      {/* Summary for plumbing_autopopulate */}
+      {autoSummary && (
+        <div style={{ fontSize: 11, opacity: 0.9 }}>
+          <strong>Auto-Populate:</strong> {autoSummary}
+        </div>
+      )}
+
+      {/* Summary for plumbing_calculate_loads */}
+      {!scheduleObj && loadsObj && (
+        <div style={{ fontSize: 11 }}>
+          <strong>Loads:</strong> {loadsObj.totalDfu ?? 0} DFU · {loadsObj.totalWsfu ?? 0} WSFU ({loadsObj.peakDemandGpm ?? 0} GPM) · Drain{' '}
+          {loadsObj.recommendedBuildingDrain ?? '-'} · Stack {loadsObj.recommendedVentStack ?? '-'}
+        </div>
+      )}
 
       {/* Summary for plumbing_generate_schedule */}
       {(scheduleObj || bomObj) && (

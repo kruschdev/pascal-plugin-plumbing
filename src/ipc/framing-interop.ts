@@ -645,7 +645,12 @@ export function computePipeFramingPenetrations(params: {
       const rule = bonesContext?.wallRules.get(wall.id)
       if (rule?.construction === 'skip' || rule?.construction === 'cmu') continue
       const spacingM = (rule?.spacingIn ?? defaultSpacingIn) * INCHES_TO_METERS
-      const halfThick = wall.thicknessM / 2 + 0.04
+      const effectiveWallThicknessM =
+        bonesContext?.source === 'structural' && typeof bonesContext.defaultStudDepthIn === 'number'
+          ? Math.max(wall.thicknessM, bonesContext.defaultStudDepthIn * INCHES_TO_METERS + INCHES_TO_METERS)
+          : wall.thicknessM
+      const studDepthM = Math.max(0.0889, effectiveWallThicknessM - INCHES_TO_METERS)
+      const halfThick = effectiveWallThicknessM / 2 + 0.04
 
       // Project endpoints into wall-local coordinates (u along wall, n perpendicular to wall)
       const ua = (a[0] - wall.start[0]) * wall.ux + (a[2] - wall.start[1]) * wall.uz
@@ -678,9 +683,8 @@ export function computePipeFramingPenetrations(params: {
             const pu = (px - wall.start[0]) * wall.ux + (pz - wall.start[1]) * wall.uz
             const pn = Math.abs((px - wall.start[0]) * wall.nx + (pz - wall.start[1]) * wall.nz)
             if (pu >= 0 && pu <= wall.lengthM && pn <= halfThick) {
-              const studDepthM = Math.max(0.0889, wall.thicknessM - 0.0254)
               const fit = checkWetWallPipeFit({
-                wallThicknessM: wall.thicknessM,
+                wallThicknessM: effectiveWallThicknessM,
                 pipeSize,
                 material,
                 isLoadBearing: rule?.isLoadBearing ?? false,
@@ -730,9 +734,8 @@ export function computePipeFramingPenetrations(params: {
           const pn = Math.abs((px - wall.start[0]) * wall.nx + (pz - wall.start[1]) * wall.nz)
           if (pn > halfThick) continue
 
-          const studDepthM = Math.max(0.0889, wall.thicknessM - 0.0254)
           const fit = checkWetWallPipeFit({
-            wallThicknessM: wall.thicknessM,
+            wallThicknessM: effectiveWallThicknessM,
             pipeSize,
             material,
             isLoadBearing: rule?.isLoadBearing ?? false,

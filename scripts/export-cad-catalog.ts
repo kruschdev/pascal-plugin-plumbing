@@ -1,5 +1,5 @@
 /**
- * Export all 42 clean-room MIT procedural plumbing 3D CAD models to binary `.glb` files in `assets/cad/`.
+ * Export all 47 clean-room MIT procedural plumbing 3D CAD models to binary `.glb` files in `assets/cad/`.
  */
 import fs from 'node:fs'
 import path from 'node:path'

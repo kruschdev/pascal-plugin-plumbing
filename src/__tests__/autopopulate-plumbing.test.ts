@@ -32,6 +32,14 @@ function buildTwoBedHouseScene(): Record<string, SceneNodeLike> {
       parentId: 'level_0',
       polygon: [[0, 4], [4, 4], [4, 8], [0, 8]],
     },
+    furn_1: {
+      id: 'furn_1',
+      type: 'hvac:equipment',
+      name: 'Gas Furnace',
+      parentId: 'level_0',
+      position: [1.5, 0, 6.2],
+      gasBtuh: 80000,
+    },
   }
 }
 

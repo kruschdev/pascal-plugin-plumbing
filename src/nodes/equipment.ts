@@ -80,17 +80,86 @@ export function getPlumbingEquipmentPorts(node: PlumbingEquipmentNode): NodePort
     x + lx * cos + lz * sin,
     zPos - lx * sin + lz * cos,
   ]
-  const [cx, cz] = rotOffset(0.1, 0)
-  const [hx, hz] = rotOffset(-0.1, 0)
-  if (node.equipmentKind === 'gas-meter') {
-    return [
-      { id: 'gas-out', position: [x, y + 0.35, zPos], direction: [0, 1, 0], diameter: 0.75, system: 'gas' },
-    ]
+
+  switch (node.equipmentKind) {
+    case 'gas-meter': {
+      const [gxIn, gzIn] = rotOffset(-0.11, 0)
+      const [gxOut, gzOut] = rotOffset(0.11, 0)
+      return [
+        { id: 'gas-in', position: [gxIn, y + 0.35, gzIn], direction: [0, 1, 0], diameter: 0.75, system: 'gas' },
+        { id: 'gas-out', position: [gxOut, y + 0.35, gzOut], direction: [0, 1, 0], diameter: 0.75, system: 'gas' },
+      ]
+    }
+    case 'water-heater-tankless-gas': {
+      const [cx, cz] = rotOffset(0.1, 0)
+      const [hx, hz] = rotOffset(-0.1, 0)
+      return [
+        { id: 'cold-in', position: [cx, y + 0.90, cz], direction: [0, -1, 0], diameter: 0.75, system: 'water' },
+        { id: 'hot-out', position: [hx, y + 0.90, hz], direction: [0, -1, 0], diameter: 0.75, system: 'water' },
+        { id: 'gas-in', position: [x, y + 0.90, zPos], direction: [0, -1, 0], diameter: 0.75, system: 'gas' },
+      ]
+    }
+    case 'expansion-tank':
+      return [
+        { id: 'water-in', position: [x, y + 0.25, zPos], direction: [0, 1, 0], diameter: 0.75, system: 'water' },
+      ]
+    case 'main-shutoff-prv':
+      return [
+        { id: 'main-in', position: [x, y - 0.28, zPos], direction: [0, -1, 0], diameter: 1, system: 'water' },
+        { id: 'main-out', position: [x, y + 0.28, zPos], direction: [0, 1, 0], diameter: 1, system: 'water' },
+      ]
+    case 'water-softener': {
+      const [inX, inZ] = rotOffset(-0.26, 0)
+      const [outX, outZ] = rotOffset(-0.18, 0)
+      return [
+        { id: 'cold-in', position: [inX, y + 1.32, inZ], direction: [0, 1, 0], diameter: 1, system: 'water' },
+        { id: 'cold-out', position: [outX, y + 1.32, outZ], direction: [0, 1, 0], diameter: 1, system: 'water' },
+      ]
+    }
+    case 'sump-pump': {
+      const [dx, dz] = rotOffset(0.08, 0)
+      return [
+        { id: 'discharge', position: [dx, y + 1.25, dz], direction: [0, 1, 0], diameter: 1.5, system: 'dwv' },
+      ]
+    }
+    case 'sewage-ejector': {
+      const [dx, dz] = rotOffset(0.08, 0)
+      const [vx, vz] = rotOffset(-0.09, 0)
+      return [
+        { id: 'discharge', position: [dx, y + 1.25, dz], direction: [0, 1, 0], diameter: 2, system: 'dwv' },
+        { id: 'vent', position: [vx, y + 1.25, vz], direction: [0, 1, 0], diameter: 2, system: 'dwv' },
+      ]
+    }
+    case 'recirc-pump': {
+      const [inX, inZ] = rotOffset(-0.10, 0)
+      const [outX, outZ] = rotOffset(0.10, 0)
+      return [
+        { id: 'recirc-in', position: [inX, y, inZ], direction: [-cos, 0, sin], diameter: 0.75, system: 'water' },
+        { id: 'recirc-out', position: [outX, y, outZ], direction: [cos, 0, -sin], diameter: 0.75, system: 'water' },
+      ]
+    }
+    case 'backwater-valve': {
+      const [inX, inZ] = rotOffset(-0.17, 0)
+      const [outX, outZ] = rotOffset(0.17, 0)
+      return [
+        { id: 'dwv-in', position: [inX, y, inZ], direction: [-cos, 0, sin], diameter: 3, system: 'dwv' },
+        { id: 'dwv-out', position: [outX, y, outZ], direction: [cos, 0, -sin], diameter: 3, system: 'dwv' },
+      ]
+    }
+    default: {
+      const [cx, cz] = rotOffset(0.1, 0)
+      const [hx, hz] = rotOffset(-0.1, 0)
+      const ports: NodePort[] = [
+        { id: 'cold-in', position: [cx, y + 1.45, cz], direction: [0, 1, 0], diameter: 0.75, system: 'water' },
+        { id: 'hot-out', position: [hx, y + 1.45, hz], direction: [0, 1, 0], diameter: 0.75, system: 'water' },
+      ]
+      if (node.equipmentKind === 'water-heater-tank-gas') {
+        const [gx, gz] = rotOffset(0, 0.30)
+        ports.push({ id: 'gas-in', position: [gx, y + 0.34, gz], direction: [sin, 0, cos], diameter: 0.5, system: 'gas' })
+      }
+      return ports
+    }
   }
-  return [
-    { id: 'cold-in', position: [cx, y + 1.45, cz], direction: [0, 1, 0], diameter: 0.75, system: 'water' },
-    { id: 'hot-out', position: [hx, y + 1.45, hz], direction: [0, 1, 0], diameter: 0.75, system: 'water' },
-  ]
 }
 
 export function buildPlumbingEquipmentGeometry(
@@ -109,6 +178,15 @@ export function buildPlumbingEquipmentGeometry(
   return group
 }
 
+const RECT_EQUIPMENT_FOOTPRINTS: Readonly<Partial<Record<EquipmentKind, readonly [number, number]>>> = {
+  'gas-meter': [0.34, 0.24],
+  'water-heater-tankless-gas': [0.40, 0.28],
+  'water-softener': [0.76, 0.40],
+  'main-shutoff-prv': [0.22, 0.14],
+  'recirc-pump': [0.22, 0.14],
+  'backwater-valve': [0.34, 0.16],
+}
+
 export function buildPlumbingEquipmentFloorplan(
   node: PlumbingEquipmentNode,
   ctx: GeometryContext,
@@ -116,27 +194,69 @@ export function buildPlumbingEquipmentFloorplan(
   const view = ctx.viewState
   const selected = (view?.selected || view?.highlighted) ?? false
   const [cx, , cz] = node.position
-  const r =
-    node.equipmentKind.startsWith('water-heater-tank') || node.equipmentKind === 'water-heater-hpwh'
-      ? 0.3
-      : 0.22
-  const baseStroke = node.equipmentKind === 'gas-meter' ? '#eab308' : '#2563eb'
+  const rot = node.rotation ?? 0
+  const cos = Math.cos(rot)
+  const sin = Math.sin(rot)
+  const toWorld = (lx: number, lz: number): [number, number] => [
+    cx + lx * cos + lz * sin,
+    cz - lx * sin + lz * cos,
+  ]
+
+  const baseStroke =
+    node.equipmentKind === 'gas-meter'
+      ? '#eab308'
+      : node.equipmentKind === 'sump-pump' ||
+          node.equipmentKind === 'sewage-ejector' ||
+          node.equipmentKind === 'backwater-valve'
+        ? '#64748b'
+        : '#2563eb'
   const stroke = selected && view?.palette ? view.palette.selectedStroke : baseStroke
 
-  const children: FloorplanGeometry[] = [
-    {
-      kind: 'circle',
-      cx,
-      cy: cz,
-      r,
-      fill: baseStroke,
-      fillOpacity: 0.14,
-      stroke,
-      strokeWidth: 0.025,
-    },
-    { kind: 'line', x1: cx - r * 0.65, y1: cz, x2: cx + r * 0.65, y2: cz, stroke, strokeWidth: 0.02 },
-    { kind: 'line', x1: cx, y1: cz - r * 0.65, x2: cx, y2: cz + r * 0.65, stroke, strokeWidth: 0.02 },
-  ]
+  const rectDims = RECT_EQUIPMENT_FOOTPRINTS[node.equipmentKind as EquipmentKind]
+  const children: FloorplanGeometry[] = []
+
+  if (rectDims) {
+    const hw = rectDims[0] / 2
+    const hd = rectDims[1] / 2
+    const [fx1, fy1] = toWorld(-hw * 0.7, hd * 0.6)
+    const [fx2, fy2] = toWorld(hw * 0.7, hd * 0.6)
+    children.push(
+      {
+        kind: 'polygon',
+        points: [toWorld(-hw, -hd), toWorld(hw, -hd), toWorld(hw, hd), toWorld(-hw, hd)],
+        fill: baseStroke,
+        fillOpacity: 0.14,
+        stroke,
+        strokeWidth: 0.025,
+      },
+      { kind: 'line', x1: fx1, y1: fy1, x2: fx2, y2: fy2, stroke, strokeWidth: 0.02 },
+    )
+  } else {
+    const r =
+      node.equipmentKind.startsWith('water-heater-tank') || node.equipmentKind === 'water-heater-hpwh'
+        ? 0.3
+        : node.equipmentKind === 'expansion-tank'
+          ? 0.14
+          : 0.25
+    const [lx1, ly1] = toWorld(-r * 0.65, 0)
+    const [lx2, ly2] = toWorld(r * 0.65, 0)
+    const [lz1, lz1y] = toWorld(0, -r * 0.65)
+    const [lz2, lz2y] = toWorld(0, r * 0.95)
+    children.push(
+      {
+        kind: 'circle',
+        cx,
+        cy: cz,
+        r,
+        fill: baseStroke,
+        fillOpacity: 0.14,
+        stroke,
+        strokeWidth: 0.025,
+      },
+      { kind: 'line', x1: lx1, y1: ly1, x2: lx2, y2: ly2, stroke, strokeWidth: 0.02 },
+      { kind: 'line', x1: lz1, y1: lz1y, x2: lz2, y2: lz2y, stroke, strokeWidth: 0.02 },
+    )
+  }
   if (selected) {
     children.push({ kind: 'move-handle', point: [cx, cz] })
   }

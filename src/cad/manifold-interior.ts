@@ -76,16 +76,19 @@ export function buildWiredManifoldCutawayCad(params: {
     add(new Mesh(new BoxGeometry(0.038, wallH, 0.14), pool.woodStud), -bayW / 2, 0, -0.02)
     add(new Mesh(new BoxGeometry(0.038, wallH, 0.14), pool.woodStud), bayW / 2, 0, -0.02)
     add(new Mesh(new BoxGeometry(0.038, wallH, 0.14), pool.woodStud), bayW / 2 + 0.406, 0, -0.02)
+    // Top & bottom horizontal wood blocking cleats anchoring the recessed manifold box to the 2x6 studs
+    add(new Mesh(new BoxGeometry(bayW - 0.02, 0.038, 0.11), pool.woodStud), 0, cabinetH / 2 + 0.018, -0.01)
+    add(new Mesh(new BoxGeometry(bayW - 0.02, 0.038, 0.11), pool.woodStud), 0, -cabinetH / 2 - 0.018, -0.01)
     // Bottom sole plate + double top plate
     add(new Mesh(new BoxGeometry(bayW + 0.50, 0.038, 0.14), pool.woodStud), 0.20, -wallH / 2, -0.02)
     add(new Mesh(new BoxGeometry(bayW + 0.50, 0.076, 0.14), pool.woodStud), 0.20, wallH / 2, -0.02)
-    // Galvanized steel nail plates (IRC R602.6 protection)
-    add(new Mesh(new BoxGeometry(0.042, 0.13, 0.004), pool.galvanizedSteel), -bayW / 2, -0.18, 0.052)
-    add(new Mesh(new BoxGeometry(0.042, 0.13, 0.004), pool.galvanizedSteel), bayW / 2, -0.18, 0.052)
+    // Galvanized steel nail plates (IRC R602.6 protection, seated flush on stud front face)
+    add(new Mesh(new BoxGeometry(0.042, 0.13, 0.004), pool.galvanizedSteel), -bayW / 2, -0.18, 0.051)
+    add(new Mesh(new BoxGeometry(0.042, 0.13, 0.004), pool.galvanizedSteel), bayW / 2, -0.18, 0.051)
     // Adjacent 3" PVC DWV Soil/Vent Stack in neighboring 2x6 bay
     add(new Mesh(new CylinderGeometry(0.044, 0.044, wallH + 0.12, 20), pool.pvcWhite), bayW / 2 + 0.20, 0, -0.02)
     add(new Mesh(new CylinderGeometry(0.052, 0.052, 0.10, 20), pool.pvcWhite), bayW / 2 + 0.20, -0.25, -0.02)
-    // Drywall backing sheet
+    // Drywall backing sheet flush against stud rear face
     add(new Mesh(new BoxGeometry(bayW + 0.52, wallH, 0.012), pool.drywallWhite), 0.20, 0, -0.095)
   }
 
@@ -97,52 +100,89 @@ export function buildWiredManifoldCutawayCad(params: {
   add(new Mesh(new BoxGeometry(wallT, cabinetH, cabinetD), pool.galvanizedSteel), -cabinetW / 2, 0, 0)
   add(new Mesh(new BoxGeometry(wallT, cabinetH, cabinetD), pool.galvanizedSteel), cabinetW / 2, 0, 0)
 
+  const hasExplicitPorts = ports.length > 0
+
   if (manifoldKind === 'gas-csst') {
-    // Brass CSST gas distribution block with yellow shutoffs
+    const activeGasIndices = new Set(
+      ports.filter((p) => p.side === 'gas' && p.active).map((p) => p.portIndex),
+    )
+    // Brass CSST gas distribution block with mounting standoffs, continuous black-iron inlet, & yellow shutoffs
     add(new Mesh(new BoxGeometry(0.06, cabinetH - 0.16, 0.05), pool.brass), 0, 0, 0.02)
-    add(new Mesh(new CylinderGeometry(0.016, 0.016, 0.16, 12), pool.blackIron), 0, -cabinetH / 2 - 0.04, 0.02)
+    add(new Mesh(new BoxGeometry(0.04, 0.04, 0.055), pool.galvanizedSteel), 0, cabinetH * 0.22, -0.025)
+    add(new Mesh(new BoxGeometry(0.04, 0.04, 0.055), pool.galvanizedSteel), 0, -cabinetH * 0.22, -0.025)
+    add(new Mesh(new CylinderGeometry(0.016, 0.016, 0.22, 12), pool.blackIron), 0, -cabinetH / 2 - 0.01, 0.02)
     for (let i = 0; i < Math.min(8, portCount); i++) {
       const y = cabinetH / 2 - 0.12 - i * 0.052
       const side = i % 2 === 0 ? -1 : 1
-      add(new Mesh(new CylinderGeometry(0.010, 0.010, 0.09, 10), pool.brass), side * 0.06, y, 0.02).rotation.z =
+      const isActive = !hasExplicitPorts || activeGasIndices.has(i)
+      add(new Mesh(new CylinderGeometry(0.010, 0.010, 0.10, 10), pool.brass), side * 0.065, y, 0.02).rotation.z =
         Math.PI / 2
-      add(new Mesh(new CylinderGeometry(0.009, 0.009, 0.16, 10), pool.csstYellow), side * 0.14, y - 0.05, 0.02)
+      if (isActive) {
+        add(new Mesh(new CylinderGeometry(0.009, 0.009, 0.16, 10), pool.csstYellow), side * 0.11, y - 0.075, 0.02)
+      } else {
+        // Capped spare port (dark plug)
+        add(new Mesh(new CylinderGeometry(0.011, 0.011, 0.018, 10), pool.darkRubber), side * 0.112, y, 0.02).rotation.z =
+          Math.PI / 2
+      }
     }
   } else {
     // Hot (Red, left) & Cold (Blue, right) vertical distribution trunks
-    const headerH = cabinetH - 0.14
+    const headerH = cabinetH - 0.10
     const hotMat = manifoldKind === 'copper-header' ? pool.copper : pool.pexHotRed
     const coldMat = manifoldKind === 'copper-header' ? pool.copper : pool.pexColdBlue
 
     add(new Mesh(new CylinderGeometry(0.022, 0.022, headerH, 16), hotMat), -0.085, 0, 0.02)
     add(new Mesh(new CylinderGeometry(0.022, 0.022, headerH, 16), coldMat), 0.085, 0, 0.02)
+    // Header mounting brackets to backplate
+    add(new Mesh(new BoxGeometry(0.22, 0.024, 0.065), pool.galvanizedSteel), 0, headerH * 0.36, -0.02)
+    add(new Mesh(new BoxGeometry(0.22, 0.024, 0.065), pool.galvanizedSteel), 0, -headerH * 0.36, -0.02)
 
-    // Bottom 3/4" main feed risers + main brass isolation ball valves
-    add(new Mesh(new CylinderGeometry(0.015, 0.015, 0.18, 12), pool.pexHotRed), -0.085, -cabinetH / 2 - 0.05, 0.02)
-    add(new Mesh(new CylinderGeometry(0.015, 0.015, 0.18, 12), pool.pexColdBlue), 0.085, -cabinetH / 2 - 0.05, 0.02)
-    add(new Mesh(new CylinderGeometry(0.022, 0.022, 0.05, 12), pool.brass), -0.085, -cabinetH / 2 + 0.03, 0.02)
-    add(new Mesh(new CylinderGeometry(0.022, 0.022, 0.05, 12), pool.brass), 0.085, -cabinetH / 2 + 0.03, 0.02)
+    // Bottom 3/4" main feed risers + main brass isolation ball valves seated directly into header bases
+    add(new Mesh(new CylinderGeometry(0.015, 0.015, 0.20, 12), pool.pexHotRed), -0.085, -cabinetH / 2 - 0.04, 0.02)
+    add(new Mesh(new CylinderGeometry(0.015, 0.015, 0.20, 12), pool.pexColdBlue), 0.085, -cabinetH / 2 - 0.04, 0.02)
+    add(new Mesh(new CylinderGeometry(0.023, 0.023, 0.06, 12), pool.brass), -0.085, -cabinetH / 2 + 0.04, 0.02)
+    add(new Mesh(new CylinderGeometry(0.023, 0.023, 0.06, 12), pool.brass), 0.085, -cabinetH / 2 + 0.04, 0.02)
 
-    // Per-port quarter-turn ball valves + color-coded PEX home-run stubs
+    // Per-port quarter-turn ball valves + color-coded PEX home-run stubs (active open vs inactive closed)
+    const activeHotIndices = new Set(
+      ports.filter((p) => p.side === 'hot' && p.active).map((p) => p.portIndex),
+    )
+    const activeColdIndices = new Set(
+      ports.filter((p) => p.side === 'cold' && p.active).map((p) => p.portIndex),
+    )
     const hotPortCount = Math.max(perSide, ports.filter((p) => p.side === 'hot').length)
     const coldPortCount = Math.max(perSide, ports.filter((p) => p.side === 'cold').length)
     const rows = Math.min(14, Math.max(hotPortCount, coldPortCount))
 
     for (let i = 0; i < rows; i++) {
-      const y = headerH / 2 - 0.04 - i * ((headerH - 0.08) / Math.max(1, rows - 1))
+      const y = headerH / 2 - 0.05 - i * ((headerH - 0.10) / Math.max(1, rows - 1))
+      const hotActive = !hasExplicitPorts || activeHotIndices.has(i)
+      const coldActive = !hasExplicitPorts || activeColdIndices.has(i)
 
-      // Hot side port (left)
+      // Hot side port (left): brass valve + seated handle (parallel=open/red when active, perpendicular=closed/dark when spare)
       add(new Mesh(new CylinderGeometry(0.009, 0.009, 0.075, 10), pool.brass), -0.13, y, 0.02).rotation.z = Math.PI / 2
-      add(new Mesh(new BoxGeometry(0.026, 0.009, 0.012), pool.pexHotRed), -0.13, y + 0.014, 0.036)
-      if (viewMode !== 'enclosure-closed') {
-        add(new Mesh(new CylinderGeometry(0.008, 0.008, 0.14, 8), pool.pexHotRed), -0.175, y - 0.05, 0.02)
+      const hotHandle = add(
+        new Mesh(new BoxGeometry(0.026, 0.009, 0.012), hotActive ? pool.pexHotRed : pool.darkRubber),
+        -0.13,
+        y + 0.009,
+        0.026,
+      )
+      if (!hotActive) hotHandle.rotation.z = Math.PI / 2
+      if (viewMode !== 'enclosure-closed' && hotActive) {
+        add(new Mesh(new CylinderGeometry(0.008, 0.008, 0.14, 8), pool.pexHotRed), -0.162, y - 0.065, 0.02)
       }
 
-      // Cold side port (right)
+      // Cold side port (right): brass valve + seated handle
       add(new Mesh(new CylinderGeometry(0.009, 0.009, 0.075, 10), pool.brass), 0.13, y, 0.02).rotation.z = Math.PI / 2
-      add(new Mesh(new BoxGeometry(0.026, 0.009, 0.012), pool.pexColdBlue), 0.13, y + 0.014, 0.036)
-      if (viewMode !== 'enclosure-closed') {
-        add(new Mesh(new CylinderGeometry(0.008, 0.008, 0.14, 8), pool.pexColdBlue), 0.175, y - 0.05, 0.02)
+      const coldHandle = add(
+        new Mesh(new BoxGeometry(0.026, 0.009, 0.012), coldActive ? pool.pexColdBlue : pool.darkRubber),
+        0.13,
+        y + 0.009,
+        0.026,
+      )
+      if (!coldActive) coldHandle.rotation.z = Math.PI / 2
+      if (viewMode !== 'enclosure-closed' && coldActive) {
+        add(new Mesh(new CylinderGeometry(0.008, 0.008, 0.14, 8), pool.pexColdBlue), 0.162, y - 0.065, 0.02)
       }
     }
   }

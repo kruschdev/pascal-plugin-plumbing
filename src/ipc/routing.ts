@@ -2,8 +2,8 @@
  * Pure 3D Plumbing Routing Engine (`src/ipc/routing.ts`).
  *
  * Trade-Priority Hierarchy:
- *   1. Structural (beams, columns, stairs, wall openings) — inviolable
- *   2. Plumbing (DWV gravity first, then Hot/Cold supply & Fuel Gas) — FIRST MEP right-of-way
+ *   1. Structural (`structural:beam`, `structural:column`, `beam`, `column`) - inviolable
+ *   2. Plumbing (DWV gravity first, then Hot/Cold supply & Fuel Gas) - FIRST MEP right-of-way
  *   3. HVAC (yields to plumbing)
  *   4. Electrical (yields to plumbing & HVAC; Plumbing respects NEC 110.26(E) overhead panel keep-out)
  *
@@ -16,7 +16,10 @@ import {
   type FoundationType,
   INCHES_TO_METERS,
   METERS_TO_FEET,
+  type OccupancyType,
+  type PipeMaterial,
   type PipeNominalSize,
+  getPipeOuterDiameterM,
   round2,
 } from './tables'
 
@@ -31,7 +34,11 @@ export type Aabb3 = {
 
 export type PlumbingObstacle = {
   id: string
+  /** Underlying scene node ID (shared across subdivided `:segN` boxes on diagonal beams). */
+  nodeId?: string
   category: 'structural' | 'electrical-dedicated-space'
+  /** Structural member role so vertical columns are never treated as under-floor beams to duck beneath. */
+  structuralKind?: 'beam' | 'column'
   label: string
   box: Aabb3
 }
@@ -209,9 +216,13 @@ export function extractWallSegments(
   return walls
 }
 
-export function classifyRoomName(name: string): RoomPolygon2D['category'] {
+export function classifyRoomName(
+  name: string,
+  occupancy: OccupancyType = 'residential',
+): RoomPolygon2D['category'] {
   const s = name.toLowerCase()
-  if (/commercial.*restroom|mens|womens|public.*bath|restroom/.test(s)) return 'commercial-restroom'
+  if (/commercial.*restroom|mens|womens|public.*(bath|restroom)/.test(s)) return 'commercial-restroom'
+  if (/restroom/.test(s)) return occupancy === 'commercial' ? 'commercial-restroom' : 'bathroom'
   if (/commercial.*kitchen|prep.*kitchen|scullery/.test(s)) return 'commercial-kitchen'
   if (/master.*bath|primary.*bath|ensuite|en-suite/.test(s)) return 'master-bath'
   if (/half.*bath|powder/.test(s)) return 'half-bath'
@@ -273,6 +284,7 @@ export function pointInPolygon2D(
 export function extractRoomPolygons(
   nodes: Readonly<Record<string, SceneNodeLike>>,
   levelId: string | null = null,
+  occupancy: OccupancyType = 'residential',
 ): RoomPolygon2D[] {
   const rooms: RoomPolygon2D[] = []
   for (const n of Object.values(nodes)) {
@@ -282,10 +294,12 @@ export function extractRoomPolygons(
     const poly = rawPoly.map((p) => [Number(p[0]), Number(p[1])] as const)
     const { areaSqm, centroid } = polygonAreaAndCentroid(poly)
     const label = typeof n.name === 'string' && n.name.trim() ? n.name.trim() : n.id
+    const rawCategory = typeof n.category === 'string' ? n.category.trim() : ''
+    const classifyText = `${rawCategory} ${label}`.trim()
     rooms.push({
       id: n.id,
       name: label,
-      category: classifyRoomName(label),
+      category: classifyRoomName(classifyText, occupancy),
       polygon: poly,
       centroid,
       areaSqm: round2(areaSqm),
@@ -327,7 +341,9 @@ export function extractPlumbingObstacles(
       const h = typeof n.heightM === 'number' ? n.heightM : levelH
       obstacles.push({
         id: n.id,
+        nodeId: n.id,
         category: 'structural',
+        structuralKind: 'column',
         label: `Structural column ${String(n.designation ?? n.columnType ?? '')} (${n.name ?? n.id})`.trim(),
         box: {
           minX: pos[0] - w / 2,
@@ -360,7 +376,9 @@ export function extractPlumbingObstacles(
           const z1 = sz + (ez - sz) * t1
           obstacles.push({
             id: `${n.id}:seg${i}`,
+            nodeId: n.id,
             category: 'structural',
+            structuralKind: 'beam',
             label,
             box: {
               minX: Math.min(x0, x1) - w / 2,
@@ -375,7 +393,9 @@ export function extractPlumbingObstacles(
       } else {
         obstacles.push({
           id: n.id,
+          nodeId: n.id,
           category: 'structural',
+          structuralKind: 'beam',
           label,
           box: {
             minX: Math.min(sx, ex) - w / 2,
@@ -393,7 +413,9 @@ export function extractPlumbingObstacles(
       const h = typeof n.height === 'number' ? n.height : levelH
       obstacles.push({
         id: n.id,
+        nodeId: n.id,
         category: 'structural',
+        structuralKind: 'column',
         label: `Structural column (${n.name ?? n.id})`,
         box: {
           minX: pos[0] - w / 2,
@@ -412,19 +434,51 @@ export function extractPlumbingObstacles(
       const w = typeof n.width === 'number' ? n.width : 0.2
       const h = typeof n.height === 'number' ? n.height : 0.3
       const y = typeof n.elevation === 'number' ? Number(n.elevation) : levelH - h / 2
-      obstacles.push({
-        id: n.id,
-        category: 'structural',
-        label: `Structural beam (${n.name ?? n.id})`,
-        box: {
-          minX: Math.min(sx, ex) - w / 2,
-          maxX: Math.max(sx, ex) + w / 2,
-          minY: y - h / 2,
-          maxY: y + h / 2,
-          minZ: Math.min(sz, ez) - w / 2,
-          maxZ: Math.max(sz, ez) + w / 2,
-        },
-      })
+      const label = `Structural beam (${n.name ?? n.id})`
+      const isDiagonal = Math.abs(ex - sx) > 0.2 && Math.abs(ez - sz) > 0.2
+      if (isDiagonal) {
+        const len = Math.hypot(ex - sx, ez - sz)
+        const steps = Math.max(2, Math.min(24, Math.ceil(len / 0.6)))
+        for (let i = 0; i < steps; i++) {
+          const t0 = i / steps
+          const t1 = (i + 1) / steps
+          const x0 = sx + (ex - sx) * t0
+          const z0 = sz + (ez - sz) * t0
+          const x1 = sx + (ex - sx) * t1
+          const z1 = sz + (ez - sz) * t1
+          obstacles.push({
+            id: `${n.id}:seg${i}`,
+            nodeId: n.id,
+            category: 'structural',
+            structuralKind: 'beam',
+            label,
+            box: {
+              minX: Math.min(x0, x1) - w / 2,
+              maxX: Math.max(x0, x1) + w / 2,
+              minY: y - h / 2,
+              maxY: y + h / 2,
+              minZ: Math.min(z0, z1) - w / 2,
+              maxZ: Math.max(z0, z1) + w / 2,
+            },
+          })
+        }
+      } else {
+        obstacles.push({
+          id: n.id,
+          nodeId: n.id,
+          category: 'structural',
+          structuralKind: 'beam',
+          label,
+          box: {
+            minX: Math.min(sx, ex) - w / 2,
+            maxX: Math.max(sx, ex) + w / 2,
+            minY: y - h / 2,
+            maxY: y + h / 2,
+            minZ: Math.min(sz, ez) - w / 2,
+            maxZ: Math.max(sz, ez) + w / 2,
+          },
+        })
+      }
     } else if ((n.type === 'electrical:panel' || n.type === 'electrical:transformer') && pos) {
       // NEC 110.26(E)(1)(a): Dedicated space equal to width & depth of panel extending from floor (y = 0) to 6 ft above (or ceiling)
       const w = typeof n.width === 'number' ? n.width : 0.42
@@ -437,6 +491,7 @@ export function extractPlumbingObstacles(
       const panelTopY = pos[1] + (typeof n.height === 'number' ? n.height / 2 : 0.46)
       obstacles.push({
         id: n.id,
+        nodeId: n.id,
         category: 'electrical-dedicated-space',
         label: `NEC 110.26(E) Dedicated Space (${n.name ?? n.id})`,
         box: {
@@ -496,9 +551,10 @@ export function detectPlumbingClashes(
     const a = path[i - 1]!
     const b = path[i]!
     for (const obs of obstacles) {
-      if (seen.has(obs.id)) continue
+      const dedupeKey = obs.nodeId ?? obs.id.replace(/:seg\d+$/, '')
+      if (seen.has(dedupeKey)) continue
       if (segmentIntersectsAabb(a, b, obs.box, pipeRadiusM + 0.02)) {
-        seen.add(obs.id)
+        seen.add(dedupeKey)
         hits.push(obs)
       }
     }
@@ -544,6 +600,15 @@ function cleanPath(pts: Vec3[]): Vec3[] {
   return out
 }
 
+function isUnderFloorBeamObstacle(o: PlumbingObstacle): boolean {
+  return (
+    o.category === 'structural' &&
+    (o.structuralKind === 'beam' ||
+      (!o.structuralKind && !/column/i.test(o.label) && o.box.maxY <= 0.25)) &&
+    o.box.minY < 0
+  )
+}
+
 /**
  * Route a gravity-sloped DWV branch from a fixture rough-in to a stack/collector point.
  * Guarantees continuous downward fall at >= required IPC slope (1/4"/ft for <= 2.5", 1/8"/ft for >= 3")
@@ -553,6 +618,8 @@ export function routeDwvDrainRun(params: {
   from: Vec3
   to: Vec3
   nominalSize: PipeNominalSize
+  material?: PipeMaterial
+  pipeRadiusM?: number
   foundationType?: FoundationType
   slopeInPerFt?: 0.125 | 0.25
   obstacles?: ReadonlyArray<PlumbingObstacle>
@@ -563,14 +630,14 @@ export function routeDwvDrainRun(params: {
   detoured: boolean
   clashes: PlumbingObstacle[]
 } {
-  const { from, to, nominalSize, foundationType = 'crawlspace', obstacles = [] } = params
+  const { from, to, nominalSize, material = 'pvc-dwv', foundationType = 'crawlspace', obstacles = [] } = params
   const minSlope = getMinRequiredDrainSlopeInPerFt(nominalSize)
   const slopeInPerFt = Math.max(params.slopeInPerFt ?? 0.25, minSlope)
   const slopeRatio = slopeInPerFt / 12 // vertical drop per horizontal unit
 
   const underFloorY = foundationType === 'slab' ? -0.35 : -0.24
   const startY = Math.min(from[1], underFloorY)
-  const pipeRadiusM = (3 * INCHES_TO_METERS) / 2
+  const pipeRadiusM = (params.pipeRadiusM ?? getPipeOuterDiameterM(nominalSize, material) / 2) + 0.015
 
   const buildSlopedCandidate = (
     horizWaypoints: ReadonlyArray<readonly [number, number]>,
@@ -605,13 +672,14 @@ export function routeDwvDrainRun(params: {
   let bestPath = primary
   let bestClashes = detectPlumbingClashes(primary, obstacles, pipeRadiusM)
   let detoured = false
+  let underBeamY: number | null = null
 
   if (bestClashes.length > 0) {
-    // If hitting a full-span under-floor structural girder, try dropping cleanly below its bottom face first!
-    const structuralHits = bestClashes.filter((o) => o.category === 'structural' && o.box.minY < 0)
+    // If hitting a full-span under-floor structural girder (never a vertical column), drop cleanly below its bottom face first!
+    const structuralHits = bestClashes.filter(isUnderFloorBeamObstacle)
     if (structuralHits.length > 0) {
       const lowestMinY = Math.min(...structuralHits.map((o) => o.box.minY))
-      const underBeamY = Math.min(startY - 0.18, lowestMinY - pipeRadiusM - 0.06)
+      underBeamY = Math.min(startY - 0.18, lowestMinY - pipeRadiusM - 0.06)
       for (const wp of [
         [[to[0], from[2]], [to[0], to[2]]] as const,
         [[from[0], to[2]], [to[0], to[2]]] as const,
@@ -644,15 +712,20 @@ export function routeDwvDrainRun(params: {
       [[from[0], to[2] + 0.95], [to[0], to[2] + 0.95], [to[0], to[2]]],
       [[from[0], to[2] - 0.95], [to[0], to[2] - 0.95], [to[0], to[2]]],
     ]
-    for (const wp of candidates) {
-      const cand = buildSlopedCandidate(wp)
-      const c = detectPlumbingClashes(cand, obstacles, pipeRadiusM)
-      if (c.length < bestClashes.length) {
-        bestPath = cand
-        bestClashes = c
-        detoured = true
-        if (c.length === 0) break
+    // Preserve underBeamY when attempting horizontal detours so a run can BOTH duck under a girder AND jog around a column/panel!
+    const startYs = underBeamY !== null ? [underBeamY, startY] : [startY]
+    for (const sy of startYs) {
+      for (const wp of candidates) {
+        const cand = buildSlopedCandidate(wp, sy)
+        const c = detectPlumbingClashes(cand, obstacles, pipeRadiusM)
+        if (c.length < bestClashes.length) {
+          bestPath = cand
+          bestClashes = c
+          detoured = true
+          if (c.length === 0) break
+        }
       }
+      if (bestClashes.length === 0) break
     }
   }
 
@@ -674,6 +747,9 @@ export function routeVentRun(params: {
   stackPoint: readonly [number, number]
   floodRimHeightM: number
   ceilingHeightM?: number
+  nominalSize?: PipeNominalSize
+  material?: PipeMaterial
+  pipeRadiusM?: number
   obstacles?: ReadonlyArray<PlumbingObstacle>
 }): {
   path: Vec3[]
@@ -682,7 +758,17 @@ export function routeVentRun(params: {
   detoured: boolean
   clashes: PlumbingObstacle[]
 } {
-  const { from, stackPoint, floodRimHeightM, ceilingHeightM = 2.6, obstacles = [] } = params
+  const {
+    from,
+    stackPoint,
+    floodRimHeightM,
+    ceilingHeightM = 2.6,
+    nominalSize,
+    material = 'pvc-dwv',
+    obstacles = [],
+  } = params
+  const pipeRadiusM =
+    params.pipeRadiusM ?? (nominalSize ? getPipeOuterDiameterM(nominalSize, material) / 2 : 0.03)
   // IPC 905.5: horizontal vent tie-in MUST be >= 6" (0.1524 m) above flood-level rim; route in upper wall/attic
   const minTieInY = floodRimHeightM + 6 * INCHES_TO_METERS + 0.1
   const tieInHeightM = Math.max(minTieInY, ceilingHeightM - 0.15)
@@ -700,7 +786,7 @@ export function routeVentRun(params: {
     [stackPoint[0], stackPoint[1]],
   ])
   let bestPath = primary
-  let bestClashes = detectPlumbingClashes(primary, obstacles, 0.03)
+  let bestClashes = detectPlumbingClashes(primary, obstacles, pipeRadiusM)
   let detoured = false
 
   if (bestClashes.length > 0) {
@@ -715,7 +801,7 @@ export function routeVentRun(params: {
     ]
     for (const wp of candidates) {
       const cand = buildVentCandidate(wp)
-      const c = detectPlumbingClashes(cand, obstacles, 0.03)
+      const c = detectPlumbingClashes(cand, obstacles, pipeRadiusM)
       if (c.length < bestClashes.length) {
         bestPath = cand
         bestClashes = c
@@ -743,6 +829,9 @@ export function routePressurizedPipeRun(params: {
   from: Vec3
   to: Vec3
   routingPlaneY: number
+  nominalSize?: PipeNominalSize
+  material?: PipeMaterial
+  pipeRadiusM?: number
   euclideanInCavity?: boolean
   obstacles?: ReadonlyArray<PlumbingObstacle>
 }): {
@@ -751,7 +840,17 @@ export function routePressurizedPipeRun(params: {
   detoured: boolean
   clashes: PlumbingObstacle[]
 } {
-  const { from, to, routingPlaneY, euclideanInCavity = true, obstacles = [] } = params
+  const {
+    from,
+    to,
+    routingPlaneY,
+    nominalSize,
+    material = 'pex-a',
+    euclideanInCavity = true,
+    obstacles = [],
+  } = params
+  const pipeRadiusM =
+    params.pipeRadiusM ?? (nominalSize ? getPipeOuterDiameterM(nominalSize, material) / 2 : 0.02)
 
   const buildCandidate = (elbowFirst: 'x' | 'z' | 'diag', offsetM = 0, planeY = routingPlaneY): Vec3[] => {
     const startPlane: Vec3 = [from[0], planeY, from[2]]
@@ -772,15 +871,15 @@ export function routePressurizedPipeRun(params: {
 
   const primary = buildCandidate(euclideanInCavity ? 'diag' : 'x', 0)
   let bestPath = primary
-  let bestClashes = detectPlumbingClashes(primary, obstacles, 0.02)
+  let bestClashes = detectPlumbingClashes(primary, obstacles, pipeRadiusM)
   let detoured = false
 
   if (bestClashes.length > 0) {
-    // Try dropping cleanly beneath any under-floor structural girder first before horizontal detours
-    const structuralHits = bestClashes.filter((o) => o.category === 'structural' && o.box.minY < 0)
+    // Try dropping cleanly beneath any under-floor structural girder (never a vertical column) first before horizontal detours
+    const structuralHits = bestClashes.filter(isUnderFloorBeamObstacle)
     const underBeamY =
       structuralHits.length > 0
-        ? Math.min(routingPlaneY - 0.16, Math.min(...structuralHits.map((o) => o.box.minY)) - 0.08)
+        ? Math.min(routingPlaneY - 0.16, Math.min(...structuralHits.map((o) => o.box.minY)) - pipeRadiusM - 0.06)
         : routingPlaneY - 0.28
     const candidates: Vec3[][] = [
       ...(structuralHits.length > 0
@@ -788,6 +887,10 @@ export function routePressurizedPipeRun(params: {
             buildCandidate(euclideanInCavity ? 'diag' : 'x', 0, underBeamY),
             buildCandidate('x', 0, underBeamY),
             buildCandidate('z', 0, underBeamY),
+            buildCandidate('x', 0.55, underBeamY),
+            buildCandidate('x', -0.55, underBeamY),
+            buildCandidate('z', 0.55, underBeamY),
+            buildCandidate('z', -0.55, underBeamY),
           ]
         : []),
       buildCandidate('x', 0),
@@ -801,7 +904,7 @@ export function routePressurizedPipeRun(params: {
       buildCandidate('x', 0, underBeamY),
     ]
     for (const cand of candidates) {
-      const c = detectPlumbingClashes(cand, obstacles, 0.02)
+      const c = detectPlumbingClashes(cand, obstacles, pipeRadiusM)
       if (c.length < bestClashes.length) {
         bestPath = cand
         bestClashes = c

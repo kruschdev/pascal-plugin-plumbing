@@ -101,48 +101,61 @@ export type PlumbingSchedule = {
   loads: PlumbingLoadSummary
 }
 
-const PASSIVE_EQUIPMENT_KINDS = new Set<string>([
-  'water-heater-tank-gas',
-  'expansion-tank',
-  'gas-meter',
-  'main-shutoff-prv',
-  'backwater-valve',
-])
-
-function readElectricalDemandFromNode(n: SceneNodeLike): ElectricalPowerDemand | null {
-  // Passive / non-electric equipment kinds never require electrical power even if stale metadata remains after an Inspector kind switch
-  if (
-    n.type === 'plumbing:equipment' &&
-    typeof n.equipmentKind === 'string' &&
-    PASSIVE_EQUIPMENT_KINDS.has(n.equipmentKind)
-  ) {
-    return null
-  }
+/**
+ * Resolve the authoritative electrical power demand for a plumbing equipment or fixture node.
+ * Recomputes from the current `equipmentKind` / `fixtureKind` whenever the unit is passive
+ * or persisted `electricalDemand` metadata is stale from a previous kind switch.
+ */
+export function resolveNodeElectricalDemand(n: SceneNodeLike): ElectricalPowerDemand | null {
   const raw = n.electricalDemand as Partial<ElectricalPowerDemand> | undefined
-  if (raw && typeof raw === 'object' && raw.required === true) {
-    return {
-      required: true,
-      voltage: (raw.voltage === 240 || raw.voltage === 208 || raw.voltage === 480 ? raw.voltage : 120),
-      poles: (raw.poles === 2 || raw.poles === 3 ? raw.poles : 1),
-      breakerAmps: typeof raw.breakerAmps === 'number' ? raw.breakerAmps : 20,
-      loadVa: typeof raw.loadVa === 'number' ? raw.loadVa : 1200,
-      continuous: Boolean(raw.continuous),
-      dedicatedCircuit: Boolean(raw.dedicatedCircuit),
-      gfciRequired: Boolean(raw.gfciRequired),
-      afciRequired: Boolean(raw.afciRequired),
-      loadCategory: (raw.loadCategory ?? 'appliance') as ElectricalPowerDemand['loadCategory'],
-      label: typeof raw.label === 'string' && raw.label ? raw.label : (n.name ?? n.id),
-    }
-  }
+
   if (n.type === 'plumbing:equipment' && typeof n.equipmentKind === 'string') {
-    return getEquipmentElectricalDemand(
+    const expected = getEquipmentElectricalDemand(
       n.equipmentKind as EquipmentKind,
-      typeof n.watts === 'number' ? n.watts : undefined,
+      typeof n.watts === 'number' && n.watts > 0 ? n.watts : undefined,
     )
+    if (!expected) return null
+    if (
+      raw &&
+      typeof raw === 'object' &&
+      raw.required === true &&
+      raw.voltage === expected.voltage &&
+      raw.poles === expected.poles &&
+      raw.loadVa === expected.loadVa &&
+      raw.breakerAmps === expected.breakerAmps &&
+      raw.label === expected.label
+    ) {
+      return {
+        ...expected,
+        gfciRequired: typeof raw.gfciRequired === 'boolean' ? raw.gfciRequired : expected.gfciRequired,
+        afciRequired: typeof raw.afciRequired === 'boolean' ? raw.afciRequired : expected.afciRequired,
+      }
+    }
+    return expected
   }
+
   if (n.type === 'plumbing:fixture' && typeof n.fixtureKind === 'string') {
-    return getFixtureElectricalDemand(n.fixtureKind as FixtureKind)
+    const expected = getFixtureElectricalDemand(n.fixtureKind as FixtureKind)
+    if (!expected) return null
+    if (
+      raw &&
+      typeof raw === 'object' &&
+      raw.required === true &&
+      raw.voltage === expected.voltage &&
+      raw.poles === expected.poles &&
+      raw.loadVa === expected.loadVa &&
+      raw.breakerAmps === expected.breakerAmps &&
+      raw.label === expected.label
+    ) {
+      return {
+        ...expected,
+        gfciRequired: typeof raw.gfciRequired === 'boolean' ? raw.gfciRequired : expected.gfciRequired,
+        afciRequired: typeof raw.afciRequired === 'boolean' ? raw.afciRequired : expected.afciRequired,
+      }
+    }
+    return expected
   }
+
   return null
 }
 
@@ -169,7 +182,7 @@ export function buildElectricalCoordination(
 
   for (const n of all) {
     if (n.type !== 'plumbing:equipment' && n.type !== 'plumbing:fixture') continue
-    const demand = readElectricalDemandFromNode(n)
+    const demand = resolveNodeElectricalDemand(n)
     if (!demand || !demand.required) continue
 
     const nodeLevelId = resolveNodeLevelId(nodes, n)
@@ -315,8 +328,13 @@ export function buildPlumbingSchedule(
   const pipeMap = new Map<string, PipeSystemSummaryRow>()
   let longestGasFt = 0
   let totalGasBtuh = 0
+  let hasCsstGas = false
+  let hasBlackIronGas = false
 
   for (const n of all) {
+    if (n.type === 'plumbing:manifold' && n.manifoldKind === 'gas-csst') {
+      hasCsstGas = true
+    }
     // Exclude supply-source gas-meter from appliance demand summation so totalGasBtuh is never doubled.
     // Also ingest `hvac:equipment` gas furnaces (zero-coupling cross-trade IFGC gas demand).
     if (
@@ -336,6 +354,8 @@ export function buildPlumbingSchedule(
 
     if (system === 'fuel-gas') {
       longestGasFt = Math.max(longestGasFt, lengthFt)
+      if (material === 'csst') hasCsstGas = true
+      if (material === 'black-iron') hasBlackIronGas = true
       if (typeof n.gasBtuh === 'number' && n.gasBtuh > totalGasBtuh) {
         totalGasBtuh = n.gasBtuh
       }
@@ -390,12 +410,13 @@ export function buildPlumbingSchedule(
     peakGpm: peakDemandGpm,
   })
 
+  const detectedGasMaterial: 'black-iron' | 'csst' = hasCsstGas && !hasBlackIronGas ? 'csst' : 'black-iron'
   const gasSizing =
     totalGasBtuh > 0
       ? sizeFuelGasPipe({
           totalBtuh: totalGasBtuh,
           longestRunFt: Math.max(25, longestGasFt),
-          material: 'black-iron',
+          material: detectedGasMaterial,
         })
       : null
 

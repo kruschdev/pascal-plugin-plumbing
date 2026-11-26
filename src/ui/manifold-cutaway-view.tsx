@@ -93,9 +93,22 @@ export default function ManifoldCutawayView({
     renderer.domElement.addEventListener('pointerdown', onDown)
     window.addEventListener('pointermove', onMove)
     window.addEventListener('pointerup', onUp)
+
+    const resizeObserver =
+      typeof ResizeObserver !== 'undefined'
+        ? new ResizeObserver((entries) => {
+            const nextW = Math.max(320, Math.round(entries[0]?.contentRect.width || el.clientWidth || 520))
+            camera.aspect = nextW / height
+            camera.updateProjectionMatrix()
+            renderer.setSize(nextW, height)
+            renderer.render(scene, camera)
+          })
+        : null
+    resizeObserver?.observe(el)
     renderer.render(scene, camera)
 
     return () => {
+      resizeObserver?.disconnect()
       renderer.domElement.removeEventListener('pointerdown', onDown)
       window.removeEventListener('pointermove', onMove)
       window.removeEventListener('pointerup', onUp)

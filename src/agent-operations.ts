@@ -10,9 +10,11 @@ import { refuse } from '@pascal-app/core/agent-tools'
 import { auditScenePlumbing } from './ipc/audit'
 import { type BonesIngestionMode, planPlumbingAutoPopulate } from './ipc/autopopulate'
 import {
+  type ElectricalPowerDemand,
   type FramingPenetration,
   type SceneNodeLike,
   type Vec3,
+  belongsToLevel,
   computePipeFramingPenetrations,
   extractBonesPlumbingContext,
   getEquipmentElectricalDemand,
@@ -84,6 +86,11 @@ function collectAllScenePenetrations(nodes: Readonly<Record<string, SceneNodeLik
   return out
 }
 
+export type PlumbingOpChanges = {
+  create?: Array<{ node: AnyNode; parentId?: string }>
+  delete?: string[]
+}
+
 export const plumbingAgentOperations = {
   plumbing_place_equipment: (
     nodes: SceneNodes,
@@ -97,9 +104,19 @@ export const plumbingAgentOperations = {
       capacityGal?: number
       gasBtuh?: number
       watts?: number
+      roomVolumeCuFt?: number
     },
     ctx: AgentContext,
-  ) => {
+  ): {
+    result: {
+      nodeId: string
+      name: string | undefined
+      equipmentKind: EquipmentKind
+      levelId: string
+      electricalDemand: ElectricalPowerDemand | null
+    }
+    changes: PlumbingOpChanges
+  } => {
     const levelId = resolveLevelId(nodes, input.levelId, ctx)
     if (!levelId) refuse('level_not_found', 'No level found in scene to host plumbing equipment.')
     const kind = input.equipmentKind ?? 'water-heater-tank-electric'
@@ -132,6 +149,7 @@ export const plumbingAgentOperations = {
       capacityGal: input.capacityGal ?? defaultCapGal,
       gasBtuh: input.gasBtuh ?? defaultGasBtuh,
       watts: input.watts ?? (electricalDemand?.loadVa ?? 0),
+      ...(typeof input.roomVolumeCuFt === 'number' ? { roomVolumeCuFt: input.roomVolumeCuFt } : {}),
       hasDrainPan: true,
       hasTpDischarge: true,
       hasExpansionTank: true,
@@ -162,17 +180,32 @@ export const plumbingAgentOperations = {
       coverRemoved?: boolean
     },
     ctx: AgentContext,
-  ) => {
+  ): {
+    result: {
+      nodeId: string
+      name: string | undefined
+      manifoldKind: ManifoldKind
+      portCount: number
+      levelId: string
+    }
+    changes: PlumbingOpChanges
+  } => {
     const levelId = resolveLevelId(nodes, input.levelId, ctx)
     if (!levelId) refuse('level_not_found', 'No level found in scene to host plumbing manifold.')
     const id = deterministicId('plumbman', nodes)
     const kind = input.manifoldKind ?? 'pex-homerun'
     const portCount = input.portCount ?? 12
+    const defaultManifoldName =
+      kind === 'gas-csst'
+        ? `CSST Fuel-Gas Manifold (${portCount}-Port)`
+        : kind === 'copper-header'
+          ? `Type L Copper Header (${portCount}-Port)`
+          : `PEX Home-Run Manifold (${portCount}-Port)`
     const node = {
       object: 'node',
       id,
       type: 'plumbing:manifold',
-      name: input.name ?? `PEX Manifold (${portCount}-Port)`,
+      name: input.name ?? defaultManifoldName,
       parentId: levelId,
       visible: true,
       metadata: {},
@@ -202,7 +235,17 @@ export const plumbingAgentOperations = {
       codeEdition?: CodeEdition
     },
     ctx: AgentContext,
-  ) => {
+  ): {
+    result: {
+      nodeId: string
+      name: string | undefined
+      fixtureKind: FixtureKind
+      dfu: number
+      wsfu: number
+      electricalDemand: ElectricalPowerDemand | null
+    }
+    changes: PlumbingOpChanges
+  } => {
     const levelId = resolveLevelId(nodes, input.levelId, ctx)
     if (!levelId) refuse('level_not_found', 'No level found in scene to host plumbing fixture.')
     const kind = input.fixtureKind ?? 'lavatory'
@@ -235,7 +278,7 @@ export const plumbingAgentOperations = {
       drainSize: spec.minDrainIn,
       ventSize: spec.minVentIn,
       supplySize: spec.supplySizeIn,
-      hasVacuumBreaker: true,
+      hasVacuumBreaker: kind === 'hose-bibb',
       hasPTrap: spec.needsPTrap,
       electricalDemand,
     } as unknown as AnyNode
@@ -263,7 +306,17 @@ export const plumbingAgentOperations = {
       hasCleanout?: boolean
     },
     ctx: AgentContext,
-  ) => {
+  ): {
+    result: {
+      nodeId: string
+      lengthFt: number
+      slopeInPerFt: number
+      detoured: boolean
+      clashes: ReturnType<typeof extractPlumbingObstacles>
+      penetrations: FramingPenetration[]
+    }
+    changes: PlumbingOpChanges
+  } => {
     const levelId = resolveLevelId(nodes, input.levelId, ctx)
     if (!levelId) refuse('level_not_found', 'No level found in scene to route pipe.')
     const record = asRecord(nodes)
@@ -306,6 +359,7 @@ export const plumbingAgentOperations = {
         from: input.from,
         to: input.to,
         nominalSize,
+        material,
         foundationType: input.foundationType ?? 'crawlspace',
         obstacles,
       })
@@ -320,6 +374,8 @@ export const plumbingAgentOperations = {
         stackPoint: [input.to[0], input.to[2]],
         floodRimHeightM: 0.9,
         ceilingHeightM: levelH,
+        nominalSize,
+        material,
         obstacles,
       })
       path = r.path
@@ -332,6 +388,8 @@ export const plumbingAgentOperations = {
         from: input.from,
         to: input.to,
         routingPlaneY: planeY,
+        nominalSize,
+        material,
         euclideanInCavity: material === 'pex-a' || material === 'pex-b',
         obstacles,
       })
@@ -405,15 +463,28 @@ export const plumbingAgentOperations = {
       clearExisting?: boolean
     },
     ctx: AgentContext,
-  ) => {
+  ): {
+    result: {
+      levelId: string
+      summary: string
+      equipmentCount: number
+      manifoldCount: number
+      fixtureCount: number
+      pipeRunCount: number
+      bonesAnchorsUsed: string[]
+      audit: ReturnType<typeof auditScenePlumbing>
+    }
+    changes: PlumbingOpChanges
+  } => {
     const levelId = resolveLevelId(nodes, input.levelId, ctx)
     if (!levelId) refuse('level_not_found', 'No level found in scene to auto-populate plumbing.')
 
     const deleteIds: string[] = []
-    const baseNodes: Record<string, SceneNodeLike> = { ...asRecord(nodes) }
+    const origRecord = asRecord(nodes)
+    const baseNodes: Record<string, SceneNodeLike> = { ...origRecord }
     if (input.clearExisting !== false) {
-      for (const [id, n] of Object.entries(baseNodes)) {
-        if (n.type.startsWith('plumbing:') && (!n.parentId || n.parentId === levelId)) {
+      for (const [id, n] of Object.entries(origRecord)) {
+        if (n.type.startsWith('plumbing:') && (!n.parentId || belongsToLevel(origRecord, n, levelId))) {
           deleteIds.push(id)
           delete baseNodes[id]
         }

@@ -11,7 +11,7 @@ Implemented deterministic tables and rules in `src/ipc/*`:
 - **IPC Table E103.3(2) & E103.3(3)**: WSFU to Modified Hunter's Curve Peak GPM (flush-tank and flushometer) plus Hazen-Williams head loss and velocity limits (`<= 5 ft/s` hot copper, `<= 8 ft/s` cold copper / PEX / CPVC).
 - **IPC 504.6 / 504.7 / 607.3**: Water heater T&P relief discharge pipe, safety drain pan, and closed-system thermal expansion tank sizing.
 - **IPC 608.15.4.2**: Anti-siphon vacuum breaker protection on exterior hose bibbs.
-- **IRC R602.6 / IPC 305.6**: `2x6` wet-wall cavity checks for `3"`/`4"` DWV pipes, `40%`/`60%` stud boring limits, hole-saw sizing, and galvanized nail-plate requirements.
+- **IRC R602.6 / IPC 305.6**: `2x6` wet-wall cavity checks for `3"`/`4"` DWV pipes, `40%`/`60%` wall stud boring limits, sole-plate and double top-plate penetration checks, hole-saw sizing, and galvanized nail-plate requirements. (Scope note: `computePipeFramingPenetrations` models wall studs, sole plates, and double top plates; `IRC R502.8` floor-joist boring and `stair`/`window`/`door` 3D obstacle extraction are not modeled.)
 - **IFGC Table 402.4(2) / 402.4(15) / 408.4 / 409.5**: Longest-length natural gas sizing for Schedule 40 Black Iron and CSST, sediment trap (drip leg), and appliance shutoff within `6 ft`.
 - **IRC M1502.4**: Smooth rigid `4"` metal dryer exhaust duct capped at `35 ft` effective length (`-5 ft` per 90° elbow, `-2.5 ft` per 45° elbow).
 - **NEC 110.26(E)**: Dedicated Electrical Space keep-out above `electrical:panel` and `electrical:transformer` nodes.
