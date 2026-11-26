@@ -9,6 +9,9 @@ An open-source, MIT-licensed **Residential and Light-Commercial IPC / UPC / IFGC
 
 I built this as a standalone external plugin implementing Pascal's full Plugin API v1 contract (`E-014`, `E-016`, `E-017`) so it installs cleanly alongside `@pascal-app/plugin-bones` and [`@kruschdev/pascal-plugin-electrical`](https://github.com/kruschdev/pascal-plugin-electrical) without requiring upstream core merges.
 
+> [!NOTE]
+> **Early Development Status:** This plugin is still in the beginning stages of being refined and is not yet at the same level of polish, depth, or completeness as my [Pascal Electrical Plugin (`@kruschdev/pascal-plugin-electrical`)](https://github.com/kruschdev/pascal-plugin-electrical). Expect active iteration on layout rules, 3D routing, and edge cases as I continue building it out.
+
 ## Walkthrough Video (Recorded Live in Pascal Editor)
 
 ![Live Pascal Editor Walkthrough: One-Click IPC/UPC Auto-Populate across Mechanical Room, Laundry, Bath, and Kitchen, Orthogonal Red/Blue PEX Home-Runs, Orange Hot Recirc, Gold Fuel Gas, Green 3" Vent Stack, Interactive 3D PEX Manifold and 2x6 Wet-Wall Cutaway, Live Fixture Schedule, Cross-Trade Electrical Power Handoff, Bones 16" OC Framing Drill List, Priced BOM Calculator, and Zero-Error IPC/IFGC Audit](./assets/demo-walkthrough.gif)
