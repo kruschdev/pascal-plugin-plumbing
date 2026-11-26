@@ -288,12 +288,15 @@ export function planPlumbingAutoPopulate(
   const pipeRuns: PlannedPipeRunSpec[] = []
   const bonesAnchorsUsed: string[] = []
 
-  let eqSeq = 1
-  let fixSeq = 1
-  let pipeSeq = 1
-  const nextEqId = () => `plumbeq_auto_${eqSeq++}`
-  const nextFixId = () => `plumbfix_auto_${fixSeq++}`
-  const nextPipeId = () => `plumbpipe_auto_${pipeSeq++}`
+  const seq = { eq: 1, man: 1, fix: 1, pipe: 1 }
+  const allocId = (prefix: string, key: keyof typeof seq) => {
+    while (nodes[`${prefix}_${seq[key]}`]) seq[key] += 1
+    return `${prefix}_${seq[key]++}`
+  }
+  const nextEqId = () => allocId('plumbeq_auto', 'eq')
+  const nextManId = () => allocId('plumbman_auto', 'man')
+  const nextFixId = () => allocId('plumbfix_auto', 'fix')
+  const nextPipeId = () => allocId('plumbpipe_auto', 'pipe')
 
   // 1. Discover placed Pascal fixtures (`item` / `cabinet`) first
   const placedFixtures: Array<{ kind: FixtureKind; pos: Vec3; roomName: string; rot: number; wallId?: string }> = []
@@ -391,6 +394,16 @@ export function planPlumbingAutoPopulate(
     })
   }
 
+  const floorBeamsForNudge = obstacles.filter((o) => o.category === 'structural' && o.box.minY < 0.15)
+  const hitsFloorBeamXZ = (cx: number, cz: number, pad = 0.28): boolean =>
+    floorBeamsForNudge.some(
+      (b) =>
+        cx >= b.box.minX - pad &&
+        cx <= b.box.maxX + pad &&
+        cz >= b.box.minZ - pad &&
+        cz <= b.box.maxZ + pad,
+    )
+
   if (bonesMode !== 'import-only') {
     for (const room of targetWetRooms) {
       if (populatedRoomNames.has(room.name) && bonesMode !== 'auto') continue
@@ -422,16 +435,28 @@ export function planPlumbingAutoPopulate(
           const frac = count === 1 ? 0.5 : i / (count - 1)
           const offsetAlong = (frac - 0.5) * span
           const baseT = Math.max(0.15, Math.min(0.85, nearWall.t))
-          const wx = wall.start[0] + wall.ux * (wall.lengthM * baseT + offsetAlong)
-          const wz = wall.start[1] + wall.uz * (wall.lengthM * baseT + offsetAlong)
-          // Offset slightly into the room from wall centerline
-          const toCx = room.centroid[0] - wx
-          const toCz = room.centroid[1] - wz
+          let alongM = wall.lengthM * baseT + offsetAlong
+          const toCx = room.centroid[0] - (wall.start[0] + wall.ux * alongM)
+          const toCz = room.centroid[1] - (wall.start[1] + wall.uz * alongM)
           const dot = toCx * wall.nx + toCz * wall.nz
           const sign = dot >= 0 ? 1 : -1
           const inward = wall.thicknessM / 2 + Math.min(0.28, spec.dimensionsM[2] / 2)
-          px = wx + wall.nx * sign * inward
-          pz = wz + wall.nz * sign * inward
+          px = wall.start[0] + wall.ux * alongM + wall.nx * sign * inward
+          pz = wall.start[1] + wall.uz * alongM + wall.nz * sign * inward
+          // Keep vertical fixture risers clear of structural floor girders (IRC R502.8)
+          if (hitsFloorBeamXZ(px, pz, 0.25)) {
+            for (const shift of [0.48, -0.48, 0.85, -0.85]) {
+              const candAlong = Math.max(0.35, Math.min(wall.lengthM - 0.35, alongM + shift))
+              const cx = wall.start[0] + wall.ux * candAlong + wall.nx * sign * inward
+              const cz = wall.start[1] + wall.uz * candAlong + wall.nz * sign * inward
+              if (!hitsFloorBeamXZ(cx, cz, 0.25)) {
+                alongM = candAlong
+                px = cx
+                pz = cz
+                break
+              }
+            }
+          }
         } else {
           px = room.centroid[0] + (i - (count - 1) / 2) * 0.75
         }
@@ -511,6 +536,38 @@ export function planPlumbingAutoPopulate(
     rooms[0] ??
     null
 
+  const nudgeOffStructuralBeams = (x: number, z: number): [number, number] => {
+    const floorBeams = obstacles.filter((o) => o.category === 'structural' && o.box.minY < 0.15)
+    if (floorBeams.length === 0) return [round2(x), round2(z)]
+    const hitsBeam = (cx: number, cz: number): boolean =>
+      floorBeams.some(
+        (b) =>
+          cx >= b.box.minX - 0.35 &&
+          cx <= b.box.maxX + 0.35 &&
+          cz >= b.box.minZ - 0.35 &&
+          cz <= b.box.maxZ + 0.35,
+      )
+    if (!hitsBeam(x, z)) return [round2(x), round2(z)]
+    for (const [dx, dz] of [
+      [0, 0.55],
+      [0, -0.55],
+      [0.55, 0],
+      [-0.55, 0],
+      [0, 0.95],
+      [0, -0.95],
+      [0.95, 0],
+      [-0.95, 0],
+    ] as const) {
+      const cx = round2(x + dx)
+      const cz = round2(z + dz)
+      if (cx < bounds.minX + 0.12 || cx > bounds.maxX - 0.12 || cz < bounds.minZ + 0.12 || cz > bounds.maxZ - 0.12) {
+        continue
+      }
+      if (!hitsBeam(cx, cz)) return [cx, cz]
+    }
+    return [round2(x), round2(z)]
+  }
+
   let whPos: Vec3 = mechRoom
     ? [round2(mechRoom.centroid[0]), 0, round2(mechRoom.centroid[1])]
     : [round2(bounds.minX + 0.75), 0, round2(bounds.minZ + 0.75)]
@@ -520,6 +577,9 @@ export function planPlumbingAutoPopulate(
       whPos = [round2(resolved[0]), 0, round2(resolved[2])]
       bonesAnchorsUsed.push(`water-heater (${bones.waterHeaterAnchor.nodeId})`)
     }
+  } else {
+    const [cx, cz] = nudgeOffStructuralBeams(whPos[0], whPos[2])
+    whPos = [cx, 0, cz]
   }
 
   let waterEntryPos: Vec3 = [round2(bounds.minX + 0.15), 0.75, round2(whPos[2])]
@@ -529,6 +589,9 @@ export function planPlumbingAutoPopulate(
       waterEntryPos = [round2(resolved[0]), round2(resolved[1] || 0.75), round2(resolved[2])]
       bonesAnchorsUsed.push(`water-entry (${bones.waterEntryAnchor.nodeId})`)
     }
+  } else {
+    const [ex, ez] = nudgeOffStructuralBeams(waterEntryPos[0], waterEntryPos[2])
+    waterEntryPos = [ex, 0.75, ez]
   }
 
   let sewerExitPos: Vec3 = [round2(bounds.maxX + 0.2), foundationType === 'slab' ? -0.55 : -0.45, round2(bounds.cz)]
@@ -606,7 +669,7 @@ export function planPlumbingAutoPopulate(
   let manifoldId: string | undefined
   const manifoldPos: Vec3 = [round2(whPos[0] + 0.65), 1.35, round2(whPos[2])]
   if (supplyTopology === 'manifold') {
-    manifoldId = 'plumbman_auto_1'
+    manifoldId = nextManId()
     const neededPorts = Math.max(12, Math.ceil((fixtures.length * 1.6) / 6) * 6)
     manifolds.push({
       id: manifoldId,
@@ -805,10 +868,34 @@ export function planPlumbingAutoPopulate(
     drainFixtures.length > 0
       ? round2(drainFixtures.reduce((s, f) => s + f.position[2], 0) / drainFixtures.length)
       : round2(bounds.cz)
-  const stackNearWall = nearestWallToPoint(stackX, stackZ, walls)
-  const stackPt: readonly [number, number] = stackNearWall
+  // Prefer a 2x6 (>= 0.145m) wet wall for the 3"/4" Main DWV Soil & Vent Stack (IRC R602.6),
+  // and keep the vertical stack centerline clear of structural floor girders (IRC R502.8).
+  const wetCapableWalls = walls.filter((w) => w.thicknessM >= 0.145)
+  const stackNearWall = nearestWallToPoint(
+    stackX,
+    stackZ,
+    wetCapableWalls.length > 0 ? wetCapableWalls : walls,
+  )
+  let stackPt: readonly [number, number] = stackNearWall
     ? [round2(stackNearWall.point[0]), round2(stackNearWall.point[1])]
     : [stackX, stackZ]
+  if (hitsFloorBeamXZ(stackPt[0], stackPt[1], 0.30)) {
+    if (stackNearWall) {
+      const w = stackNearWall.wall
+      const baseAlong = w.lengthM * stackNearWall.t
+      for (const shift of [0.55, -0.55, 0.95, -0.95]) {
+        const along = Math.max(0.35, Math.min(w.lengthM - 0.35, baseAlong + shift))
+        const cx = round2(w.start[0] + w.ux * along)
+        const cz = round2(w.start[1] + w.uz * along)
+        if (!hitsFloorBeamXZ(cx, cz, 0.30)) {
+          stackPt = [cx, cz]
+          break
+        }
+      }
+    } else {
+      stackPt = nudgeOffStructuralBeams(stackPt[0], stackPt[1])
+    }
+  }
 
   const buildingDrainSizing = sizeBuildingDrain({
     totalDfu,

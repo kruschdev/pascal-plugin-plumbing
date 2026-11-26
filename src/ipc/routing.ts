@@ -572,14 +572,17 @@ export function routeDwvDrainRun(params: {
   const startY = Math.min(from[1], underFloorY)
   const pipeRadiusM = (3 * INCHES_TO_METERS) / 2
 
-  const buildSlopedCandidate = (horizWaypoints: ReadonlyArray<readonly [number, number]>): Vec3[] => {
+  const buildSlopedCandidate = (
+    horizWaypoints: ReadonlyArray<readonly [number, number]>,
+    overrideStartY = startY,
+  ): Vec3[] => {
     const pts: Vec3[] = [from]
-    if (from[1] > startY + 0.02) {
-      pts.push([from[0], startY, from[2]])
+    if (from[1] > overrideStartY + 0.02) {
+      pts.push([from[0], overrideStartY, from[2]])
     }
     let curX = from[0]
     let curZ = from[2]
-    let curY = startY
+    let curY = overrideStartY
     for (let i = 0; i < horizWaypoints.length; i++) {
       const [wx, wz] = horizWaypoints[i]!
       const leg = Math.hypot(wx - curX, wz - curZ)
@@ -602,6 +605,28 @@ export function routeDwvDrainRun(params: {
   let bestPath = primary
   let bestClashes = detectPlumbingClashes(primary, obstacles, pipeRadiusM)
   let detoured = false
+
+  if (bestClashes.length > 0) {
+    // If hitting a full-span under-floor structural girder, try dropping cleanly below its bottom face first!
+    const structuralHits = bestClashes.filter((o) => o.category === 'structural' && o.box.minY < 0)
+    if (structuralHits.length > 0) {
+      const lowestMinY = Math.min(...structuralHits.map((o) => o.box.minY))
+      const underBeamY = Math.min(startY - 0.18, lowestMinY - pipeRadiusM - 0.06)
+      for (const wp of [
+        [[to[0], from[2]], [to[0], to[2]]] as const,
+        [[from[0], to[2]], [to[0], to[2]]] as const,
+      ]) {
+        const cand = buildSlopedCandidate(wp, underBeamY)
+        const c = detectPlumbingClashes(cand, obstacles, pipeRadiusM)
+        if (c.length < bestClashes.length) {
+          bestPath = cand
+          bestClashes = c
+          detoured = true
+          if (c.length === 0) break
+        }
+      }
+    }
+  }
 
   if (bestClashes.length > 0) {
     const midX = (from[0] + to[0]) / 2
@@ -728,21 +753,21 @@ export function routePressurizedPipeRun(params: {
 } {
   const { from, to, routingPlaneY, euclideanInCavity = true, obstacles = [] } = params
 
-  const buildCandidate = (elbowFirst: 'x' | 'z' | 'diag', offsetM = 0): Vec3[] => {
-    const startPlane: Vec3 = [from[0], routingPlaneY, from[2]]
-    const endPlane: Vec3 = [to[0], routingPlaneY, to[2]]
+  const buildCandidate = (elbowFirst: 'x' | 'z' | 'diag', offsetM = 0, planeY = routingPlaneY): Vec3[] => {
+    const startPlane: Vec3 = [from[0], planeY, from[2]]
+    const endPlane: Vec3 = [to[0], planeY, to[2]]
     if (elbowFirst === 'diag') {
       if (Math.abs(offsetM) < 1e-4) {
         return cleanPath([from, startPlane, endPlane, to])
       }
       const midX = (from[0] + to[0]) / 2 + offsetM
       const midZ = (from[2] + to[2]) / 2 - offsetM
-      return cleanPath([from, startPlane, [midX, routingPlaneY, midZ], endPlane, to])
+      return cleanPath([from, startPlane, [midX, planeY, midZ], endPlane, to])
     }
     if (elbowFirst === 'x') {
-      return cleanPath([from, startPlane, [to[0] + offsetM, routingPlaneY, from[2] + offsetM], endPlane, to])
+      return cleanPath([from, startPlane, [to[0] + offsetM, planeY, from[2] + offsetM], endPlane, to])
     }
-    return cleanPath([from, startPlane, [from[0] + offsetM, routingPlaneY, to[2] + offsetM], endPlane, to])
+    return cleanPath([from, startPlane, [from[0] + offsetM, planeY, to[2] + offsetM], endPlane, to])
   }
 
   const primary = buildCandidate(euclideanInCavity ? 'diag' : 'x', 0)
@@ -751,7 +776,20 @@ export function routePressurizedPipeRun(params: {
   let detoured = false
 
   if (bestClashes.length > 0) {
+    // Try dropping cleanly beneath any under-floor structural girder first before horizontal detours
+    const structuralHits = bestClashes.filter((o) => o.category === 'structural' && o.box.minY < 0)
+    const underBeamY =
+      structuralHits.length > 0
+        ? Math.min(routingPlaneY - 0.16, Math.min(...structuralHits.map((o) => o.box.minY)) - 0.08)
+        : routingPlaneY - 0.28
     const candidates: Vec3[][] = [
+      ...(structuralHits.length > 0
+        ? [
+            buildCandidate(euclideanInCavity ? 'diag' : 'x', 0, underBeamY),
+            buildCandidate('x', 0, underBeamY),
+            buildCandidate('z', 0, underBeamY),
+          ]
+        : []),
       buildCandidate('x', 0),
       buildCandidate('z', 0),
       buildCandidate('x', 0.55),
@@ -760,6 +798,7 @@ export function routePressurizedPipeRun(params: {
       buildCandidate('z', -0.55),
       buildCandidate('diag', 0.75),
       buildCandidate('diag', -0.75),
+      buildCandidate('x', 0, underBeamY),
     ]
     for (const cand of candidates) {
       const c = detectPlumbingClashes(cand, obstacles, 0.02)
