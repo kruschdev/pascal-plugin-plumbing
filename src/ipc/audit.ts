@@ -280,8 +280,12 @@ export function auditScenePlumbing(
       const wall = levelWallMap.get(run.wallId)!
       const bonesCtx = getBonesForLevel(runLevelId)
       const wallRule = bonesCtx.wallRules.get(wall.id)
+      const effectiveWallThicknessM =
+        bonesCtx.source === 'structural' && typeof bonesCtx.defaultStudDepthIn === 'number'
+          ? Math.max(wall.thicknessM, bonesCtx.defaultStudDepthIn * 0.0254 + 0.0254)
+          : wall.thicknessM
       const fit = checkWetWallPipeFit({
-        wallThicknessM: wall.thicknessM,
+        wallThicknessM: effectiveWallThicknessM,
         pipeSize: size,
         material,
         isLoadBearing: wallRule?.isLoadBearing ?? false,

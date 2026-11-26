@@ -280,6 +280,8 @@ export type BonesPlumbingContext = {
   /** Authoritative source of framing rules (`structural` takes Priority #1 over `bones`). */
   source?: 'structural' | 'bones' | 'default'
   defaultSpacingIn: 12 | 16 | 24
+  /** Authoritative stud cavity depth in inches from Priority #1 `structural:assembly` (`5.5` for 2x6, `3.5` for 2x4). */
+  defaultStudDepthIn?: number
   framingSystem: 'lumber' | 'lgs'
   floorSystem?: 'dimensional' | 'tji-ijoist' | 'open-web-truss'
   wallRules: ReadonlyMap<string, BonesWallRule>
@@ -372,6 +374,12 @@ export function extractBonesPlumbingContext(
       : framingNode?.studSpacingIn === 24
         ? 24
         : 16
+  const defaultStudDepthIn: number | undefined =
+    structuralNode?.studSize === '2x6'
+      ? 5.5
+      : structuralNode?.studSize === '2x4'
+        ? 3.5
+        : undefined
   const framingSystem: 'lumber' | 'lgs' = framingNode?.framingSystem === 'lgs' ? 'lgs' : 'lumber'
   const floorSystem =
     structuralNode?.floorSystem === 'tji-ijoist' ||
@@ -449,6 +457,7 @@ export function extractBonesPlumbingContext(
     framingPresent: Boolean(framingNode),
     source,
     defaultSpacingIn,
+    defaultStudDepthIn,
     framingSystem,
     floorSystem,
     wallRules,

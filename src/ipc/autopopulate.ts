@@ -880,6 +880,7 @@ export function planPlumbingAutoPopulate(
     ? [round2(stackNearWall.point[0]), round2(stackNearWall.point[1])]
     : [stackX, stackZ]
   if (hitsFloorBeamXZ(stackPt[0], stackPt[1], 0.30)) {
+    let cleared = false
     if (stackNearWall) {
       const w = stackNearWall.wall
       const baseAlong = w.lengthM * stackNearWall.t
@@ -889,10 +890,13 @@ export function planPlumbingAutoPopulate(
         const cz = round2(w.start[1] + w.uz * along)
         if (!hitsFloorBeamXZ(cx, cz, 0.30)) {
           stackPt = [cx, cz]
+          cleared = true
           break
         }
       }
-    } else {
+    }
+    // If the host wall itself runs directly over a floor girder, nudge perpendicular off the girder
+    if (!cleared) {
       stackPt = nudgeOffStructuralBeams(stackPt[0], stackPt[1])
     }
   }
