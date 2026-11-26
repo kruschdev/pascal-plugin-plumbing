@@ -29,7 +29,7 @@ import {
   type RoomPolygon2D,
   type WallOpeningSpan,
   type WallSegment2D,
-  estimateGableRoofYAt,
+  buildPlumbingRoofYAt,
   extractPlumbingObstacles,
   extractRoomPolygons,
   extractWallOpenings,
@@ -362,34 +362,18 @@ export function planPlumbingAutoPopulate(
     return true
   })
 
-  // Determine pitched roof clearance envelope for the active level so indoor supply & re-vent
-  // pipes stay strictly below the roof plane (only the Main DWV Soil & Vent Stack penetrates).
-  const allVals = Object.values(nodes)
-  const levelNodesList = allVals.filter((n) => n.type === 'level')
-  const curLevelNode = levelId ? nodes[levelId] : levelNodesList[0]
-  const curElev =
-    typeof curLevelNode?.baseElevation === 'number'
-      ? curLevelNode.baseElevation
-      : typeof curLevelNode?.level === 'number'
-        ? curLevelNode.level
-        : 0
-  const hasUpperWalledLevel =
-    curLevelNode !== undefined &&
-    levelNodesList.some((o) => {
-      if (o.id === curLevelNode.id) return false
-      const oElev = typeof o.baseElevation === 'number' ? o.baseElevation : typeof o.level === 'number' ? o.level : 0
-      return oElev > curElev && allVals.some((w) => w.type === 'wall' && w.parentId === o.id)
-    })
-  const levelAssembly = allVals.find(
+  // Determine roof clearance envelope (explicit roof-segment + pitched/flat fallback) for the active level
+  // so indoor supply & re-vent pipes stay strictly below the roof plane (only Main DWV Stack penetrates).
+  const levelAssembly = Object.values(nodes).find(
     (n) => n.type === 'structural:assembly' && belongsToLevel(nodes, n, levelId),
   )
   const roofPitchRise =
-    typeof levelAssembly?.roofPitchRise === 'number' && levelAssembly.roofPitchRise > 0
+    typeof levelAssembly?.roofPitchRise === 'number' &&
+    Number.isFinite(levelAssembly.roofPitchRise) &&
+    levelAssembly.roofPitchRise >= 0
       ? levelAssembly.roofPitchRise
       : 6
-  const maxRoofYAt: (x: number, z: number) => number = hasUpperWalledLevel
-    ? () => levelH
-    : (x, z) => estimateGableRoofYAt(x, z, bounds, levelH, roofPitchRise)
+  const maxRoofYAt = buildPlumbingRoofYAt(nodes, levelId, bounds, levelH, roofPitchRise)
 
   // Spatial clearance predicates covering ALL structural obstacles (floor girders, door/window headers,
   // ceiling/ridge beams, structural columns) + NEC 110.26(E) dedicated electrical spaces + Pascal wall openings.
@@ -1763,7 +1747,9 @@ export function planPlumbingAutoPopulate(
     ...sceneGasAppliances,
   ]
   if (includeFuelGas && gasTargets.length > 0) {
-    const gasMeterPos: Vec3 = [round2(bounds.minX - 0.15), 0.9, round2(whPos[2] + 0.8)]
+    const rawGasMeterZ = whPos[2] + 0.8 <= bounds.maxZ - 0.15 ? whPos[2] + 0.8 : whPos[2] - 0.8
+    const [, gasMeterZ] = clampToBoundsXZ(bounds.minX, rawGasMeterZ, 0.15)
+    const gasMeterPos: Vec3 = [round2(bounds.minX - 0.15), 0.9, gasMeterZ]
     const gasMeterId = nextEqId()
     const totalGasBtuh = gasTargets.reduce((sum, t) => sum + t.btuh, 0)
     equipment.push({
@@ -1790,6 +1776,7 @@ export function planPlumbingAutoPopulate(
         material: 'black-iron',
         euclideanInCavity: false,
         obstacles,
+        buildingBounds: bounds,
         maxRoofYAt,
       })
       const gasSizing = sizeFuelGasPipe({

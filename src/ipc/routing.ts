@@ -388,7 +388,12 @@ export function classifyRoomName(
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[\u2018\u2019`]/g, "'")
+  const hasIndoorTerm =
+    /bath|shower|restroom|powder|ensuite|en-suite|\bwc\d*\b|toilet|salle\s+de\s+bains?|salle\s+d'eau|salle\s+de\s+douche|\bbad\b|badezimmer|\bbano\b|\bbagno\b|kitchen|cuisine|cocina|cucina|\bkuche\b|\bkueche\b|laundry|buanderie|lavanderia|utility|bedroom|\bchambre\b|living|dining|office/.test(
+      s,
+    )
   if (
+    !hasIndoorTerm &&
     /\bpool\b|swimming|piscine|porch|patio|deck|balcony|yard|lanai|courtyard|garden|driveway|exterior|\bbalcon\b|\bterrasse\b|\bterrace\b|\bterraza\b|\bspawn\b/.test(
       s,
     )
@@ -496,6 +501,18 @@ export function resolveLevelHeightM(
   nodes: Readonly<Record<string, SceneNodeLike>>,
   levelId: string | null = null,
 ): number {
+  const walls = extractWallSegments(nodes, levelId)
+  let maxWallH = 0
+  for (const w of walls) {
+    const raw = nodes[w.id]
+    if (raw?.visible === false) continue
+    if (typeof raw?.height === 'number' && Number.isFinite(raw.height) && raw.height > 1.5 && raw.height > maxWallH) {
+      maxWallH = raw.height
+    }
+  }
+  if (maxWallH > 1.5) {
+    return maxWallH
+  }
   const levelNode =
     levelId && nodes[levelId]?.type === 'level'
       ? nodes[levelId]
@@ -512,20 +529,7 @@ export function resolveLevelHeightM(
   ) {
     return levelNode.height
   }
-  const walls = extractWallSegments(nodes, levelId)
-  const rawHeights = walls
-    .map((w) => {
-      const raw = nodes[w.id]
-      return typeof raw?.height === 'number' && Number.isFinite(raw.height) && raw.height > 1.5 ? raw.height : null
-    })
-    .filter((h): h is number => h !== null)
-  if (rawHeights.length > 0) {
-    return Math.max(2.2, ...rawHeights)
-  }
-  if (walls.length > 0) {
-    return Math.max(2.2, ...walls.map((w) => w.heightM))
-  }
-  return 2.6
+  return 2.7
 }
 
 export type BuildingBounds2D = {
@@ -554,6 +558,172 @@ export function estimateGableRoofYAt(
   const distFromRidge = Math.abs((ridgeAlongX ? z : x) - center)
   const riseM = Math.max(0, halfSpan - distFromRidge) * (pitchRiseOver12 / 12)
   return wallH + riseM
+}
+
+/**
+ * Build a roof-surface evaluator `roofYAt(x, z)` for plumbing clearance checks on `levelId`.
+ * Evaluates explicit Pascal `roof-segment` nodes on `levelId` AND (when no higher walled level exists
+ * in the same building) on any unwalled roof level at/above the current level elevation, transforming
+ * parent `roof` position & rotation before returning `Math.min(fallbackY, bestSegY)`.
+ */
+export function buildPlumbingRoofYAt(
+  nodes: Readonly<Record<string, SceneNodeLike>>,
+  levelId: string | null,
+  bounds: BuildingBounds2D,
+  wallH: number,
+  pitchRiseOver12 = 6,
+): (x: number, z: number) => number {
+  const all = Object.values(nodes)
+  const levels = all.filter((n) => n.type === 'level')
+  const curLvl = levelId ? nodes[levelId] : levels[0]
+  const getLevelElev = (lvl: SceneNodeLike | undefined): number =>
+    typeof lvl?.baseElevation === 'number' && Number.isFinite(lvl.baseElevation)
+      ? lvl.baseElevation
+      : typeof lvl?.elevation === 'number' && Number.isFinite(lvl.elevation)
+        ? lvl.elevation
+        : typeof lvl?.level === 'number' && Number.isFinite(lvl.level)
+          ? lvl.level
+          : 0
+  const curElev = getLevelElev(curLvl)
+  const curBuildingId = typeof curLvl?.parentId === 'string' ? curLvl.parentId : null
+
+  const hasUpperWalledLevel =
+    curLvl !== undefined &&
+    levels.some((o) => {
+      if (o.id === curLvl.id) return false
+      const oBldg = typeof o.parentId === 'string' ? o.parentId : null
+      if (curBuildingId && oBldg && curBuildingId !== oBldg) return false
+      return (
+        getLevelElev(o) > curElev &&
+        all.some((w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, o.id))
+      )
+    })
+
+  const unwalledUpperLevelIds = new Set<string>()
+  if (!hasUpperWalledLevel && curLvl) {
+    for (const o of levels) {
+      if (o.id === curLvl.id) continue
+      const oBldg = typeof o.parentId === 'string' ? o.parentId : null
+      if (curBuildingId && oBldg && curBuildingId !== oBldg) continue
+      const oHasWalls = all.some(
+        (w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, o.id),
+      )
+      if (!oHasWalls && getLevelElev(o) >= curElev) {
+        unwalledUpperLevelIds.add(o.id)
+      }
+    }
+  }
+
+  const extractYaw = (rawRot: unknown): number =>
+    typeof rawRot === 'number' && Number.isFinite(rawRot)
+      ? rawRot
+      : Array.isArray(rawRot) && rawRot.length >= 2 && Number.isFinite(Number(rawRot[1]))
+        ? Number(rawRot[1])
+        : 0
+
+  type ExplicitRoofSeg = {
+    cx: number
+    cz: number
+    cosR: number
+    sinR: number
+    halfW: number
+    halfD: number
+    overhangM: number
+    eaveY: number
+    slopeTan: number
+    roofType: string
+  }
+
+  const explicitSegs: ExplicitRoofSeg[] = []
+  for (const n of all) {
+    if (n.type !== 'roof-segment' || n.visible === false) continue
+    let inScope = belongsToLevel(nodes, n, levelId)
+    if (!inScope && unwalledUpperLevelIds.size > 0) {
+      for (const uid of unwalledUpperLevelIds) {
+        if (belongsToLevel(nodes, n, uid)) {
+          inScope = true
+          break
+        }
+      }
+    }
+    if (!inScope) continue
+
+    let wx = Array.isArray(n.position) ? Number(n.position[0] ?? 0) : 0
+    let wy = Array.isArray(n.position) ? Number(n.position[1] ?? 0) : 0
+    let wz = Array.isArray(n.position) ? Number(n.position[2] ?? 0) : 0
+    let rot = extractYaw(n.rotation)
+
+    let curParentId = typeof n.parentId === 'string' ? n.parentId : null
+    for (let hop = 0; hop < 6 && curParentId; hop++) {
+      const parent = nodes[curParentId]
+      if (!parent) break
+      if (parent.type === 'roof') {
+        const pRot = extractYaw(parent.rotation)
+        const pc = Math.cos(pRot)
+        const ps = Math.sin(pRot)
+        const px = Array.isArray(parent.position) ? Number(parent.position[0] ?? 0) : 0
+        const py = Array.isArray(parent.position) ? Number(parent.position[1] ?? 0) : 0
+        const pz = Array.isArray(parent.position) ? Number(parent.position[2] ?? 0) : 0
+        const rx = wx * pc + wz * ps
+        const rz = -wx * ps + wz * pc
+        wx = px + rx
+        wy = py + wy
+        wz = pz + rz
+        rot += pRot
+      }
+      curParentId = typeof parent.parentId === 'string' ? parent.parentId : null
+    }
+
+    const width = typeof n.width === 'number' && n.width > 0.2 ? n.width : 6
+    const depth = typeof n.depth === 'number' && n.depth > 0.2 ? n.depth : 6
+    const roofType = typeof n.roofType === 'string' ? n.roofType : 'gable'
+    const rawPitch = typeof n.pitch === 'number' && Number.isFinite(n.pitch) ? n.pitch : 26.57
+    const pitchRad =
+      rawPitch <= 0
+        ? 0
+        : rawPitch > 1.4
+          ? (Math.min(65, rawPitch) * Math.PI) / 180
+          : Math.min((65 * Math.PI) / 180, rawPitch)
+    const overhangM = typeof n.overhang === 'number' && n.overhang >= 0 ? n.overhang : 0.35
+    const segWallH = typeof n.wallHeight === 'number' && Number.isFinite(n.wallHeight) ? n.wallHeight : 0
+    const eaveY = wy > 0.05 ? wy + segWallH : wallH + segWallH
+    explicitSegs.push({
+      cx: wx,
+      cz: wz,
+      cosR: Math.cos(rot),
+      sinR: Math.sin(rot),
+      halfW: width / 2,
+      halfD: depth / 2,
+      overhangM,
+      eaveY,
+      slopeTan: roofType === 'flat' || pitchRad <= 0.008 ? 0 : Math.tan(pitchRad),
+      roofType,
+    })
+  }
+
+  return (x: number, z: number): number => {
+    const fallbackY = hasUpperWalledLevel
+      ? wallH
+      : estimateGableRoofYAt(x, z, bounds, wallH, pitchRiseOver12)
+    if (explicitSegs.length > 0) {
+      let bestSegY: number | null = null
+      for (const seg of explicitSegs) {
+        const dx = x - seg.cx
+        const dz = z - seg.cz
+        const lx = dx * seg.cosR - dz * seg.sinR
+        const lz = dx * seg.sinR + dz * seg.cosR
+        if (Math.abs(lx) <= seg.halfW + 0.15 && Math.abs(lz) <= seg.halfD + seg.overhangM + 0.15) {
+          const segY =
+            seg.roofType === 'shed'
+              ? seg.eaveY + Math.max(0, seg.halfD - lz) * seg.slopeTan
+              : seg.eaveY + Math.max(0, seg.halfD - Math.abs(lz)) * seg.slopeTan
+          if (bestSegY === null || segY > bestSegY) bestSegY = segY
+        }
+      }
+      if (bestSegY !== null) return Math.min(fallbackY, bestSegY)
+    }
+    return fallbackY
+  }
 }
 
 /**
@@ -946,6 +1116,25 @@ function exceedsEnvelopeXZ(path: ReadonlyArray<Vec3>, env: BuildingBounds2D | nu
   return false
 }
 
+function minRoofAlongPath(
+  path: ReadonlyArray<Vec3>,
+  maxRoofYAt?: (x: number, z: number) => number,
+): number {
+  if (!maxRoofYAt) return Infinity
+  let minY = Infinity
+  for (let i = 1; i < path.length; i++) {
+    const a = path[i - 1]!
+    const b = path[i]!
+    for (const f of [0, 0.25, 0.5, 0.75, 1]) {
+      const px = a[0] + (b[0] - a[0]) * f
+      const pz = a[2] + (b[2] - a[2]) * f
+      const ry = maxRoofYAt(px, pz)
+      if (ry < minY) minY = ry
+    }
+  }
+  return minY
+}
+
 function exceedsRoofPlane(
   path: ReadonlyArray<Vec3>,
   pipeRadiusM: number,
@@ -1235,16 +1424,17 @@ export function routeVentRun(params: {
     params.pipeRadiusM ?? (nominalSize ? getPipeOuterDiameterM(nominalSize, material) / 2 : 0.03)
   const env = resolveAllowedEnvelope(buildingBounds, from, stackPoint)
   // IPC 905.5: horizontal vent tie-in MUST be >= 6" (0.1524 m) above flood-level rim; route in upper wall/attic
+  const ipcMinVentY = floodRimHeightM + 6 * INCHES_TO_METERS + 0.01
   const minHorizontalVentY = floodRimHeightM + 6 * INCHES_TO_METERS + 0.04
   const minTieInY = floodRimHeightM + 6 * INCHES_TO_METERS + 0.1
+  const maxSafeCeilingY = ceilingHeightM - 0.08 - pipeRadiusM
   const rawTieInHeightM = Math.max(minTieInY, ceilingHeightM - 0.15)
   const minEndpointRoofCap = maxRoofYAt
     ? Math.min(maxRoofYAt(from[0], from[2]), maxRoofYAt(stackPoint[0], stackPoint[1])) - pipeRadiusM - 0.09
     : Infinity
-  const tieInHeightM =
-    Number.isFinite(minEndpointRoofCap) && minEndpointRoofCap >= minHorizontalVentY
-      ? Math.min(rawTieInHeightM, minEndpointRoofCap)
-      : rawTieInHeightM
+  const tieInHeightM = Number.isFinite(minEndpointRoofCap)
+    ? Math.max(ipcMinVentY, Math.min(rawTieInHeightM, minEndpointRoofCap))
+    : rawTieInHeightM
 
   const buildVentCandidate = (
     waypoints: ReadonlyArray<readonly [number, number]>,
@@ -1284,13 +1474,25 @@ export function routeVentRun(params: {
     const elevatedHits = bestClashes.filter(isElevatedBeamObstacle)
     const allElevatedBeams = obstacles.filter(isElevatedBeamObstacle)
 
+    const primaryMinRoofCap = maxRoofYAt
+      ? minRoofAlongPath(primary, maxRoofYAt) - pipeRadiusM - 0.09
+      : Infinity
+    const altPrimary = buildVentCandidate([
+      [from[0], stackPoint[1]],
+      [stackPoint[0], stackPoint[1]],
+    ])
+    const altMinRoofCap = maxRoofYAt
+      ? minRoofAlongPath(altPrimary, maxRoofYAt) - pipeRadiusM - 0.09
+      : Infinity
+    const lowestObservedRoofCap = Math.min(minEndpointRoofCap, primaryMinRoofCap, altMinRoofCap)
+
     // Candidate attic/upper-wall tie-in elevations:
     // 1. Default tieInHeightM
-    // 2. Hop cleanly ABOVE wall headers into ceiling/attic space (while remaining strictly under pitched roof)
-    // 3. Duck cleanly BELOW a high ceiling/ridge beam when still >= 6" above fixture flood rim (IPC 905.5)
+    // 2. Hop cleanly ABOVE wall headers into ceiling/attic space (while remaining strictly under roof envelope)
+    // 3. Duck cleanly BELOW a high ceiling/ridge beam or low/flat explicit roof segment while staying >= 6" above flood rim (IPC 905.5)
     const tieYs: number[] = [tieInHeightM]
-    const pushTieY = (y: number) => {
-      if (y < minHorizontalVentY || y > maxAtticTieY) return
+    const pushTieY = (y: number, minFloorY = ipcMinVentY) => {
+      if (!Number.isFinite(y) || y < minFloorY || y > maxAtticTieY) return
       if (!tieYs.some((v) => Math.abs(v - y) < 0.02)) tieYs.push(y)
     }
     if (elevatedHits.length > 0) {
@@ -1299,6 +1501,9 @@ export function routeVentRun(params: {
       pushTieY(aboveHit)
       pushTieY(belowHit)
     }
+    if (Number.isFinite(minEndpointRoofCap)) pushTieY(minEndpointRoofCap)
+    if (Number.isFinite(primaryMinRoofCap)) pushTieY(primaryMinRoofCap)
+    if (Number.isFinite(altMinRoofCap)) pushTieY(altMinRoofCap)
     const headerBeams = allElevatedBeams.filter(
       (o) => o.beamRole === 'header' || /header/i.test(o.label) || o.box.maxY <= ceilingHeightM + 0.08,
     )
@@ -1306,11 +1511,13 @@ export function routeVentRun(params: {
       pushTieY(Math.max(...headerBeams.map((o) => o.box.maxY)) + pipeRadiusM + 0.05)
     }
     pushTieY(ceilingHeightM - 0.15)
+    pushTieY(Math.min(ceilingHeightM - 0.15, maxSafeCeilingY))
+    pushTieY(ceilingHeightM - 0.25)
+    pushTieY(ceilingHeightM - 0.45)
     pushTieY(ceilingHeightM + 0.14)
     pushTieY(ceilingHeightM + 0.28)
-    if (Number.isFinite(minEndpointRoofCap)) {
-      pushTieY(minEndpointRoofCap)
-    }
+    pushTieY(minHorizontalVentY)
+    pushTieY(ipcMinVentY)
 
     // Check if the vertical riser at `from` hits a window/door header or beam directly above the fixture.
     // If so, offset horizontally past the header jamb at `jogY >= floodRim + 6"` (IPC 905.5) before rising!
@@ -1499,10 +1706,14 @@ export function routePressurizedPipeRun(params: {
     if (elevatedHits.length > 0) {
       const aboveHit = Math.max(...elevatedHits.map((o) => o.box.maxY)) + pipeRadiusM + 0.06
       const belowHit = Math.min(...elevatedHits.map((o) => o.box.minY)) - pipeRadiusM - 0.06
+      const aboveViolatesRoof =
+        maxRoofYAt !== undefined &&
+        aboveHit + pipeRadiusM >
+          Math.min(maxRoofYAt(from[0], from[2]), maxRoofYAt(to[0], to[2])) - 0.08 + 1e-4
       // Always try routing OVER door/window headers first; suppress belowHit on overhead runs (> 1.8m)
-      // so supply pipes never drop horizontally across open doorways or window glass.
+      // when routing over fits beneath the roof envelope so supply pipes never drop across open doorways/windows.
       pushPlaneY(aboveHit)
-      if (!(allElevatedAreHeaders && routingPlaneY > 1.8)) {
+      if (!(allElevatedAreHeaders && routingPlaneY > 1.8 && !aboveViolatesRoof)) {
         pushPlaneY(belowHit)
       }
     }
@@ -1510,11 +1721,21 @@ export function routePressurizedPipeRun(params: {
     if (!(allElevatedAreHeaders && routingPlaneY > 1.8)) {
       pushPlaneY(routingPlaneY - 0.28)
     }
-    if (maxRoofYAt && bestRoofViolation) {
-      const roofSafeY =
+    if (maxRoofYAt) {
+      const endpointRoofCap =
         Math.min(maxRoofYAt(from[0], from[2]), maxRoofYAt(to[0], to[2])) - pipeRadiusM - 0.09
-      if (roofSafeY < routingPlaneY && !(allElevatedAreHeaders && roofSafeY < Math.min(...elevatedHits.map((o) => o.box.minY)))) {
-        pushPlaneY(roofSafeY)
+      const primaryRoofCap = minRoofAlongPath(primary, maxRoofYAt) - pipeRadiusM - 0.09
+      const roofSafeY = Math.min(endpointRoofCap, primaryRoofCap)
+      if (bestRoofViolation || roofSafeY < routingPlaneY) {
+        if (Number.isFinite(endpointRoofCap) && endpointRoofCap < routingPlaneY) {
+          pushPlaneY(endpointRoofCap)
+        }
+        if (Number.isFinite(primaryRoofCap) && primaryRoofCap < routingPlaneY) {
+          pushPlaneY(primaryRoofCap)
+        }
+        if (Number.isFinite(roofSafeY) && roofSafeY < routingPlaneY) {
+          pushPlaneY(roofSafeY - 0.12)
+        }
       }
     }
 

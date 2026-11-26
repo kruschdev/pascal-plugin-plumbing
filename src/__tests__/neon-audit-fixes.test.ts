@@ -428,17 +428,24 @@ describe('Plumbing Audit & Visual Geometry Regression Suite (PLU-BUG-01..05, PLU
   })
 
   test('VIS-02 & VIS-06: level height uses level.height / tallest wall, indoor equipment & runs stay inside walled footprint & below pitched roof, and pools/patios are excluded', () => {
-    // 1. resolveLevelHeightM: level.height takes precedence; without it, tallest perimeter wall wins (never averaged down by 2.5m partitions)
-    const gymWithLevelH: Record<string, SceneNodeLike> = {
+    // 1. resolveLevelHeightM: explicit tallest wall (> 1.5m) wins (aligned with Structural audit);
+    //    when walls omit explicit heights, level.height is used, falling back to 2.7m.
+    const gymWithExplicitWalls: Record<string, SceneNodeLike> = {
       level_0: { id: 'level_0', type: 'level', height: 5.0 },
       w_ext1: { id: 'w_ext1', type: 'wall', parentId: 'level_0', start: [0, 0], end: [12, 0], height: 4.8 },
       w_part1: { id: 'w_part1', type: 'wall', parentId: 'level_0', start: [2, 0], end: [2, 3], height: 2.5 },
       w_part2: { id: 'w_part2', type: 'wall', parentId: 'level_0', start: [0, 3], end: [2, 3], height: 2.5 },
     }
-    expect(resolveLevelHeightM(gymWithLevelH, 'level_0')).toBe(5.0)
+    expect(resolveLevelHeightM(gymWithExplicitWalls, 'level_0')).toBe(4.8)
+
+    const gymLevelHeightFallback: Record<string, SceneNodeLike> = {
+      level_0: { id: 'level_0', type: 'level', height: 5.0 },
+      w_ext1: { id: 'w_ext1', type: 'wall', parentId: 'level_0', start: [0, 0], end: [12, 0] },
+    }
+    expect(resolveLevelHeightM(gymLevelHeightFallback, 'level_0')).toBe(5.0)
 
     const gymNoLevelH: Record<string, SceneNodeLike> = {
-      ...gymWithLevelH,
+      ...gymWithExplicitWalls,
       level_0: { id: 'level_0', type: 'level' },
     }
     expect(resolveLevelHeightM(gymNoLevelH, 'level_0')).toBe(4.8)
