@@ -45,8 +45,8 @@ export default function ManifoldCutawayView({
     scene.background = new Color(0x0f172a)
 
     const camera = new PerspectiveCamera(42, width / height, 0.05, 20)
-    camera.position.set(0.35, 0.25, 1.45)
-    camera.lookAt(0.06, 0, 0)
+    camera.position.set(0.32, 0.12, 1.95)
+    camera.lookAt(0.14, 0, 0)
 
     const renderer = new WebGLRenderer({ antialias: true })
     renderer.setSize(width, height)

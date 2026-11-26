@@ -89,8 +89,13 @@ export function buildWiredManifoldCutawayCad(params: {
     add(new Mesh(new BoxGeometry(bayW + 0.52, wallH, 0.012), pool.drywallWhite), 0.20, 0, -0.095)
   }
 
-  // Recessed steel manifold backbox
-  add(new Mesh(new BoxGeometry(cabinetW, cabinetH, cabinetD), pool.galvanizedSteel), 0, 0, -0.01)
+  // Open-front recessed steel manifold backbox (thin backplate + 4 side flanges so headers & valves are 100% visible!)
+  const wallT = 0.012
+  add(new Mesh(new BoxGeometry(cabinetW, cabinetH, wallT), pool.galvanizedSteel), 0, 0, -cabinetD / 2)
+  add(new Mesh(new BoxGeometry(cabinetW, wallT, cabinetD), pool.galvanizedSteel), 0, cabinetH / 2, 0)
+  add(new Mesh(new BoxGeometry(cabinetW, wallT, cabinetD), pool.galvanizedSteel), 0, -cabinetH / 2, 0)
+  add(new Mesh(new BoxGeometry(wallT, cabinetH, cabinetD), pool.galvanizedSteel), -cabinetW / 2, 0, 0)
+  add(new Mesh(new BoxGeometry(wallT, cabinetH, cabinetD), pool.galvanizedSteel), cabinetW / 2, 0, 0)
 
   if (manifoldKind === 'gas-csst') {
     // Brass CSST gas distribution block with yellow shutoffs
