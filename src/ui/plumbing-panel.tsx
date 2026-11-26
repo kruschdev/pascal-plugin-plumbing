@@ -101,6 +101,10 @@ export default function PlumbingHostPanel() {
   const deleteNodes = useScene((s) => s.deleteNodes)
   const updateNodes = useScene((s) => s.updateNodes)
   const selectedLevelId = useViewer((s) => s.selection.levelId)
+  const wallMode = useViewer((s) => s.wallMode)
+  const setWallMode = useViewer((s) => s.setWallMode)
+  const xrayFamily = useViewer((s) => s.xrayFamily)
+  const setXrayFamily = useViewer((s) => s.setXrayFamily)
 
   const {
     occupancy,
@@ -411,6 +415,69 @@ export default function PlumbingHostPanel() {
           <span style={{ color: unwiredPowerCount > 0 ? '#f59e0b' : '#22c55e', fontWeight: 600 }}>
             {schedule.electricalCoordination.length - unwiredPowerCount}/{schedule.electricalCoordination.length} Wired
           </span>
+        </div>
+      </div>
+
+      <div style={sectionStyle}>
+        <div style={{ fontWeight: 600, fontSize: 11 }}>3D Pipe &amp; Sub-Slab Inspection</div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 5 }}>
+          <button
+            type="button"
+            onClick={() => {
+              setXrayFamily(null)
+              setWallMode('up')
+            }}
+            style={{
+              ...ghostBtnStyle,
+              background: xrayFamily === null && wallMode === 'up' ? 'rgba(56,189,248,0.2)' : 'transparent',
+              borderColor: xrayFamily === null && wallMode === 'up' ? 'rgba(56,189,248,0.6)' : undefined,
+              fontWeight: xrayFamily === null && wallMode === 'up' ? 600 : 400,
+            }}
+          >
+            Full Walls
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setXrayFamily(null)
+              setWallMode('cutaway')
+            }}
+            style={{
+              ...ghostBtnStyle,
+              background: xrayFamily === null && wallMode === 'cutaway' ? 'rgba(56,189,248,0.2)' : 'transparent',
+              borderColor: xrayFamily === null && wallMode === 'cutaway' ? 'rgba(56,189,248,0.6)' : undefined,
+              fontWeight: xrayFamily === null && wallMode === 'cutaway' ? 600 : 400,
+            }}
+          >
+            Cutaway
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setXrayFamily(null)
+              setWallMode('down')
+            }}
+            style={{
+              ...ghostBtnStyle,
+              background: xrayFamily === null && wallMode === 'down' ? 'rgba(56,189,248,0.2)' : 'transparent',
+              borderColor: xrayFamily === null && wallMode === 'down' ? 'rgba(56,189,248,0.6)' : undefined,
+              fontWeight: xrayFamily === null && wallMode === 'down' ? 600 : 400,
+            }}
+          >
+            Low Walls
+          </button>
+          <button
+            type="button"
+            onClick={() => setXrayFamily(xrayFamily === 'other' ? null : 'other')}
+            style={{
+              ...ghostBtnStyle,
+              background: xrayFamily === 'other' ? 'rgba(16,185,129,0.22)' : 'transparent',
+              borderColor: xrayFamily === 'other' ? 'rgba(16,185,129,0.65)' : undefined,
+              fontWeight: xrayFamily === 'other' ? 600 : 400,
+            }}
+          >
+            X-Ray Plumbing
+          </button>
         </div>
       </div>
 

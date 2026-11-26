@@ -697,7 +697,7 @@ export function planPlumbingAutoPopulate(
     waterEntryPos = [ex, 0.75, ez]
   }
 
-  let sewerExitPos: Vec3 = [round2(bounds.maxX + 0.2), foundationType === 'slab' ? -0.55 : -0.45, round2(bounds.cz)]
+  let sewerExitPos: Vec3 = [round2(bounds.maxX + 1.2), foundationType === 'slab' ? -0.55 : -0.45, round2(bounds.cz)]
   if (bones?.sewerExitAnchor) {
     const resolved = resolveBonesAnchorPosition(nodes, bones.sewerExitAnchor, -0.45)
     if (resolved) {
@@ -1070,9 +1070,10 @@ export function planPlumbingAutoPopulate(
         minUpstreamSize: fix.drainSize,
         codeEdition,
       })
+      const branchStartY = foundationType === 'slab' ? -0.35 : -0.24
       const dwvRoute = routeDwvDrainRun({
         from: fix.position,
-        to: [stackPt[0], defaultStackBaseY, stackPt[1]],
+        to: [stackPt[0], branchStartY, stackPt[1]],
         nominalSize: branchSizing.recommendedSize,
         material: dwvMaterial,
         foundationType,
