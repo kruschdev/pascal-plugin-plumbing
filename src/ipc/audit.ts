@@ -26,12 +26,13 @@ import {
   polylineHorizontalLengthM,
   polylineLengthM,
 } from './routing'
-import { IPC_DECLARATIVE_RULES, IPC_RULE_THRESHOLDS, getIpcRuleById } from './rules'
+import { IPC_RULE_THRESHOLDS, getIpcRuleById } from './rules'
 import { buildElectricalCoordination } from './schedule'
 import {
   calculateSupplyHydraulics,
   checkDryerVentRun,
   checkTrapArmDistance,
+  getMinRequiredDrainSlopeInPerFt,
   sizeBuildingDrain,
   sizeDrainBranch,
   sizeFuelGasPipe,
@@ -255,7 +256,6 @@ export function auditScenePlumbing(
   const dryerVentRule = getIpcRuleById('irc-m1502-4-dryer-vent')
   const dryerVentMaterialRule = getIpcRuleById('irc-m1502-4-1-dryer-vent-material')
   const fuelGasMaxLenRule = getIpcRuleById('ifgc-402-4-fuel-gas-max-len')
-  void IPC_DECLARATIVE_RULES
 
   for (const run of pipeRuns) {
     const system = (run.system as PlumbingSystem) || 'cold-water'
@@ -427,7 +427,8 @@ export function auditScenePlumbing(
         }
       }
 
-      const isLargeDrain = nominalIn >= IPC_RULE_THRESHOLDS.wetWallMinPipeNominalIn
+      const requiredSlope = getMinRequiredDrainSlopeInPerFt(size)
+      const isLargeDrain = requiredSlope <= IPC_RULE_THRESHOLDS.drainSlopeLargeInPerFt
       const slopeRule = isLargeDrain ? drainSlopeLargeRule : drainSlopeSmallRule
       const minSlope = slopeRule.params.minSlopeInPerFt!
       if (slopeInfo) {
@@ -727,9 +728,9 @@ export function auditScenePlumbing(
       push({
         severity: 'warning',
         codeRef: 'IPC 903.1',
-        title: `DWV system missing 3" main vent stack through roof${lvlSuffix}`,
+        title: `DWV system missing ${IPC_RULE_THRESHOLDS.mainVentStackMinNominalIn}" main vent stack through roof${lvlSuffix}`,
         detail: `Every building level with plumbing drainage${lvlSuffix} requires vent stack connection extending outdoors.`,
-        suggestedFix: 'Add a 3" main soil/vent stack terminating outdoors through the roof.',
+        suggestedFix: `Add a ${IPC_RULE_THRESHOLDS.mainVentStackMinNominalIn}" main soil/vent stack terminating outdoors through the roof.`,
         nodeIds: st.sampleDrainIds,
       })
     }

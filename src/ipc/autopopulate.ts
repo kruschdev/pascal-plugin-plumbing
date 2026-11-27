@@ -42,13 +42,11 @@ import {
   type RoomPolygon2D,
   type WallOpeningSpan,
   type WallSegment2D,
-  buildPlumbingRoofYAt,
   countPathElbows,
-  detectPlumbingClashes,
-  extractPlumbingObstacles,
   extractRoomPolygons,
-  extractWallOpenings,
   extractWallSegments,
+  mapCanonicalWallsToOpenings,
+  mapOccupancyObstaclesToPlumbing,
   nearestWallToPoint,
   pointInPolygon2D,
   resolveLevelHeightM,
@@ -56,7 +54,7 @@ import {
   routePressurizedPipeRun,
   routeVentRun,
 } from './routing'
-import { IPC_DECLARATIVE_RULES, IPC_RULE_THRESHOLDS, getIpcRuleById } from './rules'
+import { IPC_RULE_THRESHOLDS, getIpcRuleById } from './rules'
 import {
   checkDryerVentRun,
   sizeBuildingDrain,
@@ -343,11 +341,9 @@ export function planPlumbingAutoPopulate(
   const wallById = new Map<string, WallSegment2D>(walls.map((w) => [w.id, w]))
   const rooms = extractRoomPolygons(nodes, levelId, occupancy)
   const levelH = resolveLevelHeightM(nodes, levelId)
-  const obstacles = extractPlumbingObstacles(nodes, levelId)
   const wetWallFitRule = getIpcRuleById('irc-r602-6-wet-wall-fit')
   const dryerVentRule = getIpcRuleById('irc-m1502-4-dryer-vent')
   const dryerVentMaterialRule = getIpcRuleById('irc-m1502-4-1-dryer-vent-material')
-  void IPC_DECLARATIVE_RULES
 
   // Layer 2 — Shared WeakMap-cached BuildingAnatomy, LegalCavityGraph & TradeOccupancyGrid
   const anatomy = compileBuildingAnatomy(nodes)
@@ -360,6 +356,7 @@ export function planPlumbingAutoPopulate(
         })
       : undefined
   const occupancyGrid = anatomy.createOccupancyGrid(levelId, { forTrade: 'plumbing' })
+  const obstacles = mapOccupancyObstaclesToPlumbing(occupancyGrid.obstacles)
   const cavityContext: PlumbingCavityContext = {
     nodes,
     levelId,
@@ -367,7 +364,7 @@ export function planPlumbingAutoPopulate(
     ...(legalCavityGraph ? { graph: legalCavityGraph } : {}),
     occupancy: occupancyGrid,
   }
-  const wallOpenings = extractWallOpenings(nodes, levelId)
+  const wallOpenings = mapCanonicalWallsToOpenings(anatomy.getWalls(levelId))
   const openingsByWall = new Map<string, WallOpeningSpan[]>()
   for (const op of wallOpenings) {
     let list = openingsByWall.get(op.wallId)
@@ -435,7 +432,11 @@ export function planPlumbingAutoPopulate(
     levelAssembly.roofPitchRise >= 0
       ? levelAssembly.roofPitchRise
       : 6
-  const maxRoofYAt = buildPlumbingRoofYAt(nodes, levelId, bounds, levelH, roofPitchRise)
+  const maxRoofYAt = anatomy.getRoofShell(levelId, {
+    wallBounds: bounds,
+    fallbackPitchRiseOver12: roofPitchRise,
+    clampOverhangToEave: true,
+  }).roofEnvelopeY
 
   // Spatial clearance predicates covering ALL structural obstacles (floor girders, door/window headers,
   // ceiling/ridge beams, structural columns) + NEC 110.26(E) dedicated electrical spaces + Pascal wall openings.
@@ -1636,7 +1637,6 @@ export function planPlumbingAutoPopulate(
     codeEdition,
   })
   const mainVentSizing = sizeVentStack({ totalDfu, isMainStack: true })
-  const stackNominalIn = PIPE_NOMINAL_INCHES[mainVentSizing.recommendedSize] ?? 3
   const stackPipeRadiusM = getPipeOuterDiameterM(mainVentSizing.recommendedSize, dwvMaterial) / 2
 
   const canWallFitPipe = (wall: WallSegment2D, pipeSize: PipeNominalSize, pos: Vec3): boolean => {
@@ -1690,16 +1690,7 @@ export function planPlumbingAutoPopulate(
         return true
       }
     }
-    return (
-      detectPlumbingClashes(
-        [
-          [cx, -0.5, cz],
-          [cx, round2(levelH + 0.45), cz],
-        ],
-        electricalDedicatedSpaces,
-        stackPipeRadiusM,
-      ).length > 0
-    )
+    return false
   }
 
   const isStackPointClear = (cx: number, cz: number, wall: WallSegment2D | null, alongM: number, pad: number): boolean => {
@@ -1841,7 +1832,6 @@ export function planPlumbingAutoPopulate(
       stackWallId = undefined
     }
   }
-  void stackNominalIn
 
   // Allocate stack ID first, route fixture branches to find lowest arrival invert
   // so the Main Building Drain ALWAYS starts at or below every arriving branch drain invert!
@@ -2269,7 +2259,10 @@ export function planPlumbingAutoPopulate(
           material: dryerMaterial,
           euclideanInCavity: false,
           obstacles,
+          buildingBounds: bounds,
+          maxRoofYAt,
           cavityContext,
+          allowedBands: ['under-sill', 'mid-wall', 'overhead-plenum'],
         })
         const { elbows90, elbows45 } = countPathElbows(route.path)
         const check = checkDryerVentRun({ lengthFt: route.lengthFt, elbows90, elbows45 })

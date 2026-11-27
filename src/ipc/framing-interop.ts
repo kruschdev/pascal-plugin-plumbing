@@ -13,6 +13,7 @@ import {
   isGroundOrLowestWalledLevel as kernelIsGroundOrLowestWalledLevel,
   resolveNodeLevelId as kernelResolveNodeLevelId,
 } from '@kruschdev/pascal-mep-kernel'
+import { IPC_RULE_THRESHOLDS } from './rules'
 import {
   type EquipmentKind,
   type FixtureKind,
@@ -301,9 +302,9 @@ export type BonesPlumbingContext = {
 
 export const DRESSED_STUD_THICKNESS_M = 1.5 * INCHES_TO_METERS
 /** Standard 2x4 cavity depth = 3.5" (0.0889 m); finished 2x4 wall = ~4.5" (0.114 m). */
-export const WALL_2X4_MAX_THICKNESS_M = 0.125
+export const WALL_2X4_MAX_THICKNESS_M = IPC_RULE_THRESHOLDS.wetWallMax2x4ThicknessM
 /** Standard 2x6 cavity depth = 5.5" (0.1397 m); finished 2x6 wall = ~6.5" (0.165 m). */
-export const WALL_2X6_MIN_THICKNESS_M = 0.14
+export const WALL_2X6_MIN_THICKNESS_M = IPC_RULE_THRESHOLDS.wetWallMinThicknessM
 
 export function belongsToLevel(
   nodes: Readonly<Record<string, SceneNodeLike>>,

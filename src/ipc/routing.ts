@@ -12,9 +12,11 @@
 
 import {
   type BuildingAnatomy,
+  type CanonicalWall,
   type CavityBand,
   type CavityRouteResult,
   type LegalCavityGraph,
+  type OccupancyObstacle,
   type RoutingPhysicsMode,
   TradeOccupancyGrid,
   compileBuildingAnatomy,
@@ -235,6 +237,36 @@ export function extractWallSegments(
 }
 
 /**
+ * Map pre-extracted `CanonicalWall` openings (filtering walls with `lengthM >= 0.3`)
+ * directly into `WallOpeningSpan[]` without re-scanning scene nodes.
+ */
+export function mapCanonicalWallsToOpenings(
+  walls: ReadonlyArray<CanonicalWall>,
+): WallOpeningSpan[] {
+  const out: WallOpeningSpan[] = []
+  for (const wall of walls) {
+    if (wall.lengthM < 0.3) continue
+    for (const op of wall.openings) {
+      out.push({
+        id: op.id,
+        wallId: op.wallId,
+        kind: op.kind,
+        name: op.name ?? op.kind,
+        uCenterM: op.uCenterM,
+        widthM: op.widthM,
+        startU: op.startU,
+        endU: op.endU,
+        sillYM: op.framedSillYM,
+        headYM: op.headYM,
+        centerX: op.centerX,
+        centerZ: op.centerZ,
+      })
+    }
+  }
+  return out
+}
+
+/**
  * Extract all Pascal `door` and `window` opening spans along walls on a level
  * (handling both native `door`/`window` nodes and wall-attached opening `item` nodes).
  */
@@ -244,75 +276,7 @@ export function extractWallOpenings(
 ): WallOpeningSpan[] {
   const walls = extractCanonicalWalls(nodes, levelId, { minLengthM: 0.3 })
   if (walls.length === 0) return []
-  const out: WallOpeningSpan[] = []
-
-  for (const wall of walls) {
-    const rawWall = nodes[wall.id]
-    const childIds = new Set<string>(
-      rawWall && Array.isArray(rawWall.children)
-        ? rawWall.children.filter((cid): cid is string => typeof cid === 'string')
-        : [],
-    )
-    for (const op of wall.openings) {
-      const rawNode = nodes[op.id]
-      const isWallChild =
-        (typeof rawNode?.parentId === 'string' && rawNode.parentId === wall.id) ||
-        childIds.has(op.id)
-      let uCenterM = op.uCenterM
-      let startU = op.startU
-      let endU = op.endU
-      let widthM = op.widthM
-      let centerX = op.centerX
-      let centerZ = op.centerZ
-
-      // Non-child openings referenced via `wallId` carry world XZ coordinates even near z = 0 (PLU-BUG-05)
-      if (
-        !isWallChild &&
-        rawNode &&
-        Array.isArray(rawNode.position) &&
-        typeof rawNode.position[0] === 'number' &&
-        Number.isFinite(rawNode.position[0])
-      ) {
-        const px = Number(rawNode.position[0])
-        const pz =
-          typeof rawNode.position[2] === 'number' && Number.isFinite(rawNode.position[2])
-            ? Number(rawNode.position[2])
-            : 0
-        const nominalW =
-          typeof rawNode.width === 'number' && Number.isFinite(rawNode.width) && rawNode.width > 0
-            ? Math.max(0.2, Math.min(wall.lengthM, rawNode.width))
-            : op.widthM
-        const projU = (px - wall.start[0]) * wall.ux + (pz - wall.start[1]) * wall.uz
-        const nextStartU = Math.max(0, projU - nominalW / 2)
-        const nextEndU = Math.min(wall.lengthM, projU + nominalW / 2)
-        if (nextEndU - nextStartU >= 0.05) {
-          startU = nextStartU
-          endU = nextEndU
-          uCenterM = (startU + endU) / 2
-          widthM = endU - startU
-          centerX = wall.start[0] + wall.ux * uCenterM
-          centerZ = wall.start[1] + wall.uz * uCenterM
-        }
-      }
-
-      out.push({
-        id: op.id,
-        wallId: op.wallId,
-        kind: op.kind,
-        name: op.name ?? op.kind,
-        uCenterM,
-        widthM,
-        startU,
-        endU,
-        sillYM: op.framedSillYM,
-        headYM: op.headYM,
-        centerX,
-        centerZ,
-      })
-    }
-  }
-
-  return out
+  return mapCanonicalWallsToOpenings(walls)
 }
 
 export function classifyRoomName(
@@ -454,16 +418,12 @@ export function buildPlumbingRoofYAt(
 }
 
 /**
- * Extract Priority #1 Structural obstacles AND NEC 110.26(E) Dedicated Electrical Space columns
- * (footprint of any `electrical:panel` or `electrical:transformer` extending from floor to structural ceiling).
+ * Map pre-extracted kernel `OccupancyObstacle[]` into `PlumbingObstacle[]`,
+ * subdividing diagonal structural beams once into tight AABB segments.
  */
-export function extractPlumbingObstacles(
-  nodes: Readonly<Record<string, SceneNodeLike>>,
-  levelId: string | null = null,
+export function mapOccupancyObstaclesToPlumbing(
+  kernelObstacles: ReadonlyArray<OccupancyObstacle>,
 ): PlumbingObstacle[] {
-  const kernelObstacles = extractTradeOccupancyObstacles(nodes, levelId, {
-    forTrade: 'plumbing',
-  })
   const obstacles: PlumbingObstacle[] = []
 
   for (const occ of kernelObstacles) {
@@ -519,6 +479,20 @@ export function extractPlumbingObstacles(
   }
 
   return obstacles
+}
+
+/**
+ * Extract Priority #1 Structural obstacles AND NEC 110.26(E) Dedicated Electrical Space columns
+ * (footprint of any `electrical:panel` or `electrical:transformer` extending from floor to structural ceiling).
+ */
+export function extractPlumbingObstacles(
+  nodes: Readonly<Record<string, SceneNodeLike>>,
+  levelId: string | null = null,
+): PlumbingObstacle[] {
+  const kernelObstacles = extractTradeOccupancyObstacles(nodes, levelId, {
+    forTrade: 'plumbing',
+  })
+  return mapOccupancyObstaclesToPlumbing(kernelObstacles)
 }
 
 export function segmentIntersectsAabb(a: Vec3, b: Vec3, box: Aabb3, margin = 0.02): boolean {
@@ -814,6 +788,7 @@ function exceedsConcaveFootprint(
     if (a[1] <= 0.05 && b[1] <= 0.05) continue
     if (
       !footprint.isSegmentInside(a, b, {
+        precedence: 'room-first',
         wallToleranceM: 0.45,
         skipExteriorEndpointMarginM: 0.45,
       })
@@ -836,6 +811,36 @@ function isVentPathCodeCompliant(path: ReadonlyArray<Vec3>, minHorizontalY: numb
     if (horiz > 0.25 && Math.min(a[1], b[1]) < minHorizontalY - 0.02) return false
   }
   return true
+}
+
+const defaultCavityGraphCache = new WeakMap<BuildingAnatomy, Map<string, LegalCavityGraph>>()
+
+function getOrCompileDefaultCavityGraph(
+  anatomy: BuildingAnatomy,
+  levelId: string | null,
+  opts: {
+    roofClearanceM: number
+    pipeRadiusM: number
+    subFloorElevationM: number
+  },
+): LegalCavityGraph {
+  let byKey = defaultCavityGraphCache.get(anatomy)
+  if (!byKey) {
+    byKey = new Map()
+    defaultCavityGraphCache.set(anatomy, byKey)
+  }
+  const key = `${levelId === null ? '__all__' : JSON.stringify(levelId)}|${opts.subFloorElevationM}|${opts.roofClearanceM}|${opts.pipeRadiusM}`
+  let graph = byKey.get(key)
+  if (!graph) {
+    graph = compileLegalCavityGraph(anatomy, levelId, {
+      roofClearanceM: opts.roofClearanceM,
+      halfY: opts.pipeRadiusM,
+      halfXZ: opts.pipeRadiusM,
+      subFloorElevationM: opts.subFloorElevationM,
+    })
+    byKey.set(key, graph)
+  }
+  return graph
 }
 
 /**
@@ -882,10 +887,9 @@ export function routePlumbingViaLegalCavity(
 
   const graph =
     params.graph ??
-    compileLegalCavityGraph(anatomy, levelId, {
+    getOrCompileDefaultCavityGraph(anatomy, levelId, {
       roofClearanceM,
-      halfY: pipeRadiusM,
-      halfXZ: pipeRadiusM,
+      pipeRadiusM,
       subFloorElevationM: defaultSubFloorY,
     })
 
@@ -929,7 +933,8 @@ export function routePlumbingViaLegalCavity(
       params.minSlopeInPerFt ??
       (nominalSize ? getMinRequiredDrainSlopeInPerFt(nominalSize) : IPC_RULE_THRESHOLDS.drainSlopeSmallInPerFt)
     allowedBands = params.allowedBands ?? ['under-slab', 'crawlspace', 'under-sill', 'mid-wall']
-    if (graph.subFloorY !== null && effectiveTo[1] > graph.subFloorY) {
+    const allowsSubFloor = allowedBands.includes('under-slab') || allowedBands.includes('crawlspace')
+    if (allowsSubFloor && graph.subFloorY !== null && effectiveTo[1] > graph.subFloorY) {
       effectiveTo = [effectiveTo[0], graph.subFloorY, effectiveTo[2]]
     }
   } else if (mode === 'non-descending-vent') {
@@ -1329,7 +1334,6 @@ export function routeVentRun(params: {
       return bestClashes.length === 0 && !bestBoundsViolation && !bestRoofViolation
     }
 
-    if (bestClashes.length > 0 || bestBoundsViolation || bestRoofViolation) {
     const edgePad = pipeRadiusM + 0.07
     const maxAtticTieY = ceilingHeightM + 0.36
     const elevatedHits = bestClashes.filter(isElevatedBeamObstacle)
@@ -1345,8 +1349,6 @@ export function routeVentRun(params: {
     const altMinRoofCap = maxRoofYAt
       ? minRoofAlongPath(altPrimary, maxRoofYAt) - pipeRadiusM - 0.09
       : Infinity
-    const lowestObservedRoofCap = Math.min(minEndpointRoofCap, primaryMinRoofCap, altMinRoofCap)
-    void lowestObservedRoofCap
 
     // Candidate attic/upper-wall tie-in elevations:
     // 1. Default tieInHeightM
@@ -1427,7 +1429,6 @@ export function routeVentRun(params: {
       }
       if (bestClashes.length === 0 && !bestBoundsViolation && !bestRoofViolation) break
     }
-    }
 
     // Layer 2 — Legal-Space-First Cavity Rescue (non-descending-vent, IPC 905.5 & 905.2)
     if ((bestClashes.length > 0 || bestBoundsViolation || bestRoofViolation) && hasCavityScene(cavityContext)) {
@@ -1487,6 +1488,8 @@ export function routePressurizedPipeRun(params: {
   buildingBounds?: BuildingBounds2D
   maxRoofYAt?: (x: number, z: number) => number
   cavityContext?: PlumbingCavityContext
+  /** Optional explicit cavity band whitelist for Layer 2 cavity rescue. */
+  allowedBands?: readonly CavityBand[]
 }): {
   path: Vec3[]
   lengthFt: number
@@ -1558,14 +1561,14 @@ export function routePressurizedPipeRun(params: {
   if (bestClashes.length > 0 || bestBoundsViolation || bestRoofViolation) {
     const maxEval = 300
     let evalCount = 0
-    const tryPressurized = (cand: Vec3[]): boolean => {
-      if (evalCount >= maxEval) return true
-      evalCount += 1
+    const tryPressurized = (cand: Vec3[], bypassBudget = false): boolean => {
+      if (!bypassBudget && evalCount >= maxEval) return true
+      if (!bypassBudget) evalCount += 1
       const boundsViol =
         exceedsEnvelopeXZ(cand, env) || exceedsConcaveFootprint(cand, cavityContext, checkFootprint)
       const roofViol = exceedsRoofPlane(cand, pipeRadiusM, maxRoofYAt)
-      if (boundsViol && !bestBoundsViolation) return evalCount >= maxEval
-      if (roofViol && !bestRoofViolation && boundsViol === bestBoundsViolation) return evalCount >= maxEval
+      if (boundsViol && !bestBoundsViolation) return !bypassBudget && evalCount >= maxEval
+      if (roofViol && !bestRoofViolation && boundsViol === bestBoundsViolation) return !bypassBudget && evalCount >= maxEval
       const c = detectPlumbingClashes(cand, obstacles, pipeRadiusM)
       const better =
         (bestBoundsViolation && !boundsViol) ||
@@ -1578,10 +1581,12 @@ export function routePressurizedPipeRun(params: {
         bestRoofViolation = roofViol
         detoured = true
       }
-      return (bestClashes.length === 0 && !bestBoundsViolation && !bestRoofViolation) || evalCount >= maxEval
+      return (
+        (bestClashes.length === 0 && !bestBoundsViolation && !bestRoofViolation) ||
+        (!bypassBudget && evalCount >= maxEval)
+      )
     }
 
-    if (bestClashes.length > 0 || bestBoundsViolation || bestRoofViolation) {
     const edgePad = pipeRadiusM + 0.07
     const allUnderBeams = obstacles.filter(isUnderFloorBeamObstacle)
     const structuralHits = bestClashes.filter(isUnderFloorBeamObstacle)
@@ -1737,12 +1742,19 @@ export function routePressurizedPipeRun(params: {
       }
       if (isDone()) break
     }
-    }
 
-    // Layer 2 — Legal-Space-First Cavity Rescue (strict horizontal plumbing bands: never intrude on mid-wall electrical chases)
+    // Layer 2 — Legal-Space-First Cavity Rescue:
+    // - Sub-floor planes (<= 0.1 m): strictly under-slab / crawlspace
+    // - Low-elevation appliance runs (0.1 m < y <= 0.6 m, e.g. 4" dryer vent at 0.35 m): allow under-sill / mid-wall / overhead-plenum
+    // - Overhead pressurized water/gas mains (> 0.6 m): strictly overhead-plenum / attic (never intrude on mid-wall/top-plate electrical chases)
     if ((bestClashes.length > 0 || bestBoundsViolation || bestRoofViolation) && hasCavityScene(cavityContext)) {
       const allowedBands: readonly CavityBand[] =
-        routingPlaneY <= 0.1 ? ['under-slab', 'crawlspace'] : ['overhead-plenum', 'attic']
+        params.allowedBands ??
+        (routingPlaneY <= 0.1
+          ? ['under-slab', 'crawlspace']
+          : routingPlaneY <= 0.6
+            ? ['under-sill', 'mid-wall', 'overhead-plenum']
+            : ['overhead-plenum', 'attic'])
       const cav = routePlumbingViaLegalCavity({
         ...cavityContext,
         from,
@@ -1755,7 +1767,7 @@ export function routePressurizedPipeRun(params: {
         obstacles,
       })
       if (cav.path.length >= 2) {
-        tryPressurized(cav.path)
+        tryPressurized(cav.path, true)
       }
     }
   }
