@@ -1,6 +1,6 @@
 {
   "name": "@kruschdev/pascal-plugin-plumbing",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Residential & Light-Commercial IPC/UPC/IFGC plumbing authoring, DFU/WSFU/gas load calculations, gravity-sloped DWV & PEX manifold routing, and code audit plugin for Pascal Editor.",
   "author": "Kevin Ruschman <kruschdev@users.noreply.github.com>",
   "license": "MIT",

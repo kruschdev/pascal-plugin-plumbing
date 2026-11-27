@@ -21,9 +21,9 @@ Watch the full two-story Aymeric House finished-to-cutaway walkthrough (Structur
 
 ## Walkthrough Video (Recorded Live in Pascal Editor)
 
-![Live Pascal Editor Walkthrough: One-Click IPC/UPC Auto-Populate across Mechanical Room, Laundry, Bath, and Kitchen, Orthogonal Red/Blue PEX Home-Runs, Orange Hot Recirc, Gold Fuel Gas, Green 3" Vent Stack, Interactive 3D PEX Manifold and 2x6 Wet-Wall Cutaway, Live Fixture Schedule, Cross-Trade Electrical Power Handoff, Bones 16" OC Framing Drill List, Priced BOM Calculator, and Zero-Error IPC/IFGC Audit](./assets/demo-walkthrough.gif)
+![Live Pascal Editor Walkthrough: One-Click IPC/UPC Auto-Populate across Mechanical Room, Laundry, Bath, and Kitchen, Orthogonal Red/Blue PEX Home-Runs, Orange Hot Recirc, Gold Fuel Gas, Green 3" Vent Stack, Interactive 3D PEX Manifold and 2x6 Wet-Wall Cutaway, Live Fixture Schedule, Cross-Trade Electrical Power Handoff, Bones 16" OC Framing Drill List, Priced BOM Calculator, and Zero-Error IPC/IFGC Audit](https://github.com/kruschdev/pascal-plugin-plumbing/releases/download/v0.2.0/demo-walkthrough.gif)
 
-**[Watch Full 720p HD Narrated Walkthrough Video Recorded in Pascal Editor (`assets/demo-walkthrough.mp4`)](./assets/demo-walkthrough.mp4)**
+**[Watch Full 720p HD Narrated Walkthrough Video Recorded in Pascal Editor (`assets/demo-walkthrough.mp4`)](https://github.com/kruschdev/pascal-plugin-plumbing/releases/download/v0.2.0/demo-walkthrough.mp4)**
 
 1. **One-Click IPC/UPC Auto-Populate and Bones Interop**: Scans Pascal room zones, placed Pascal bathroom/kitchen/laundry fixtures, and optional `@pascal-app/plugin-bones` `bones:framing` and `bones:service` (`water-heater`, `water-entry`, `sewer-exit`) anchors to place mechanical equipment, PEX home-run manifolds (or trunk-and-branch copper/PEX), wet-wall fixture rough-ins, frost-proof hose bibbs with anti-siphon vacuum breakers, gravity-sloped DWV drains, 3" roof vent stacks, dry re-vents (`>= 6"` above flood-level rim), optional IFGC fuel gas, and 4" rigid aluminum dryer vents.
 2. **Priority #2 MEP Right-of-Way and Legal-Cavity Gravity DWV Routing**: Plumbing holds first MEP right-of-way (`1. Structural -> 2. Plumbing -> 3. HVAC -> 4. Electrical`) via [`@kruschdev/pascal-mep-kernel`](https://github.com/kruschdev/pascal-mep-kernel) with true monotonic downward gravity pitch (`1/4"/ft` for `<= 2-1/2"`, `1/8"/ft` minimum for `>= 3"`), non-descending vent routing (`IPC 905.5`), automatic detours around rotated structural beams/columns (`structural:beam`, `structural:column`, `beam`, `column`) and 3D door/window opening prisms, concave footprint containment, and enforcement of **NEC 110.26(E) Dedicated Electrical Space** above electrical panels and transformers.
@@ -34,13 +34,13 @@ Watch the full two-story Aymeric House finished-to-cutaway walkthrough (Structur
 
 ## Showcase Gallery
 
-![4-Panel 3D PEX Manifold and 2x6 Wet-Wall Cutaway Showcase: 2x6 Wet-Wall and 3" Stack Cutaway, Zoomed Red/Blue PEX-A Quarter-Turn Ball Valves and IRC R602.6 Nail Plates, 24-Port PEX Manifold Steel Enclosure Closed, and 8-Port CSST Fuel-Gas Manifold](./assets/demo-manifold-cutaway.png)
+![4-Panel 3D PEX Manifold and 2x6 Wet-Wall Cutaway Showcase: 2x6 Wet-Wall and 3" Stack Cutaway, Zoomed Red/Blue PEX-A Quarter-Turn Ball Valves and IRC R602.6 Nail Plates, 24-Port PEX Manifold Steel Enclosure Closed, and 8-Port CSST Fuel-Gas Manifold](https://github.com/kruschdev/pascal-plugin-plumbing/releases/download/v0.2.0/demo-manifold-cutaway.png)
 
-![Live Pascal Editor Plumbing Rail and X-Ray Sub-Slab Inspection View: Mechanical Room Water Heater and PEX Manifold, Orthogonal Red Hot and Blue Cold PEX-A Home-Runs, Orange Hot Recirculation Loop, Gold IFGC Fuel Gas, Green 3" Vent Stack, and Uniform 1/4"/ft Sloped ABS DWV Drains Dropping to the 3" Building Drain Below Grade](./assets/demo-3d-plumbing-routing.png)
+![Live Pascal Editor Plumbing Rail and X-Ray Sub-Slab Inspection View: Mechanical Room Water Heater and PEX Manifold, Orthogonal Red Hot and Blue Cold PEX-A Home-Runs, Orange Hot Recirculation Loop, Gold IFGC Fuel Gas, Green 3" Vent Stack, and Uniform 1/4"/ft Sloped ABS DWV Drains Dropping to the 3" Building Drain Below Grade](https://github.com/kruschdev/pascal-plugin-plumbing/releases/download/v0.2.0/demo-3d-plumbing-routing.png)
 
-![Split-Pane Pascal Editor 3D Viewport and Live Populated Plumbing Engineering Schedule (IPC-2021) with 11 Fixtures across Mechanical Room, Laundry, Bath, and Kitchen, 18 DFU, 16.95 GPM Peak Demand, and Zero-Error IPC Audit](./assets/demo-plumbing-schedule.png)
+![Split-Pane Pascal Editor 3D Viewport and Live Populated Plumbing Engineering Schedule (IPC-2021) with 11 Fixtures across Mechanical Room, Laundry, Bath, and Kitchen, 18 DFU, 16.95 GPM Peak Demand, and Zero-Error IPC Audit](https://github.com/kruschdev/pascal-plugin-plumbing/releases/download/v0.2.0/demo-plumbing-schedule.png)
 
-![47 Clean-Room MIT Plumbing CAD Material Models (.glb): Water Heaters and Mechanical Equipment, PEX/Copper/CSST Manifolds, Residential and Commercial Fixtures, DWV Fittings and Cleanouts, Supply and Fuel-Gas Valves, Pipe Hangers, and 2x6 Wet-Wall Cutaway](./assets/cad-material-catalog.png)
+![47 Clean-Room MIT Plumbing CAD Material Models (.glb): Water Heaters and Mechanical Equipment, PEX/Copper/CSST Manifolds, Residential and Commercial Fixtures, DWV Fittings and Cleanouts, Supply and Fuel-Gas Valves, Pipe Hangers, and 2x6 Wet-Wall Cutaway](https://github.com/kruschdev/pascal-plugin-plumbing/releases/download/v0.2.0/cad-material-catalog.png)
 
 ### 47-Model Clean-Room MIT CAD Library (6 Categories)
 

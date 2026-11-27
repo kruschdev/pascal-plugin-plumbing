@@ -86,7 +86,7 @@ const PipeNominalSize = z.enum([
 export const plumbingAgentTools: PluginAgentTools = {
   pluginId: 'krusch:plumbing',
   apiVersion: 1,
-  version: '0.1.0',
+  version: '0.2.0',
   instructions:
     'Plumbing holds Priority #2 MEP right-of-way (1. Structural -> 2. Plumbing -> 3. HVAC -> 4. Electrical) due to gravity DWV slope requirements. Plumbing yields ONLY to Structural members and NEC 110.26(E) Dedicated Electrical Space above electrical panels. Every powered plumbing unit (electric/HPWH water heater, sump pump, sewage ejector, dishwasher, disposal, washer) publishes an `electricalDemand` spec so Electrical automatically adds its breaker and 3D power run.',
   skills: [

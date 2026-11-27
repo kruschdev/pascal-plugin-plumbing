@@ -6,13 +6,13 @@ Ready-to-share narrated walkthrough video, high-resolution screenshots, 3D CAD c
 
 | Asset | Resolution / Format | Best Use |
 |---|---|---|
-| [`assets/social-preview.png`](../assets/social-preview.png) | `1280 x 640` PNG | GitHub Social Preview, OpenGraph card, LinkedIn/X link banner |
-| [`assets/demo-walkthrough.mp4`](../assets/demo-walkthrough.mp4) | `1280 x 720` H.264 MP4 (`72.2s`, narrated AAC + `+faststart`) | X video post, LinkedIn native video, YouTube, GitHub Release |
-| [`assets/demo-walkthrough.gif`](../assets/demo-walkthrough.gif) | `640px` palette-optimized GIF | README preview, Reddit, Discord, Slack |
-| [`assets/demo-3d-plumbing-routing.png`](../assets/demo-3d-plumbing-routing.png) | `1440 x 810` PNG | Live Pascal Editor X-Ray Plumbing view showing Mechanical Room core, Red/Blue PEX home-runs, Orange Recirc, Gold Gas, Green 3" vents, and uniform `1/4"/ft` sloped ABS DWV drains dropping to the 3" building drain out below grade |
-| [`assets/demo-manifold-cutaway.png`](../assets/demo-manifold-cutaway.png) | `1920 x 760` PNG | 4-panel 3D PEX Manifold & 2x6 Wet-Wall Cutaway showcase (Wet-Wall & 3" Stack Cutaway, Zoom Ball Valves & Nail Plates, 24-Port Steel Enclosure Closed, 8-Port CSST Gas Manifold) |
-| [`assets/demo-plumbing-schedule.png`](../assets/demo-plumbing-schedule.png) | `1440 x 810` PNG | Live split-pane 3D house + populated Plumbing Engineering Schedule (`IPC-2021`) |
-| [`assets/cad-material-catalog.png`](../assets/cad-material-catalog.png) | `1680 x 2560` PNG | Complete 47-model clean-room MIT Plumbing CAD catalog contact sheet (5x10 studio grid) |
+| [`assets/social-preview.png`](https://github.com/kruschdev/pascal-plugin-plumbing/releases/download/v0.2.0/social-preview.png) | `1280 x 640` PNG | GitHub Social Preview, OpenGraph card, LinkedIn/X link banner |
+| [`assets/demo-walkthrough.mp4`](https://github.com/kruschdev/pascal-plugin-plumbing/releases/download/v0.2.0/demo-walkthrough.mp4) | `1280 x 720` H.264 MP4 (`72.2s`, narrated AAC + `+faststart`) | X video post, LinkedIn native video, YouTube, GitHub Release |
+| [`assets/demo-walkthrough.gif`](https://github.com/kruschdev/pascal-plugin-plumbing/releases/download/v0.2.0/demo-walkthrough.gif) | `640px` palette-optimized GIF | README preview, Reddit, Discord, Slack |
+| [`assets/demo-3d-plumbing-routing.png`](https://github.com/kruschdev/pascal-plugin-plumbing/releases/download/v0.2.0/demo-3d-plumbing-routing.png) | `1440 x 810` PNG | Live Pascal Editor X-Ray Plumbing view showing Mechanical Room core, Red/Blue PEX home-runs, Orange Recirc, Gold Gas, Green 3" vents, and uniform `1/4"/ft` sloped ABS DWV drains dropping to the 3" building drain out below grade |
+| [`assets/demo-manifold-cutaway.png`](https://github.com/kruschdev/pascal-plugin-plumbing/releases/download/v0.2.0/demo-manifold-cutaway.png) | `1920 x 760` PNG | 4-panel 3D PEX Manifold & 2x6 Wet-Wall Cutaway showcase (Wet-Wall & 3" Stack Cutaway, Zoom Ball Valves & Nail Plates, 24-Port Steel Enclosure Closed, 8-Port CSST Gas Manifold) |
+| [`assets/demo-plumbing-schedule.png`](https://github.com/kruschdev/pascal-plugin-plumbing/releases/download/v0.2.0/demo-plumbing-schedule.png) | `1440 x 810` PNG | Live split-pane 3D house + populated Plumbing Engineering Schedule (`IPC-2021`) |
+| [`assets/cad-material-catalog.png`](https://github.com/kruschdev/pascal-plugin-plumbing/releases/download/v0.2.0/cad-material-catalog.png) | `1680 x 2560` PNG | Complete 47-model clean-room MIT Plumbing CAD catalog contact sheet (5x10 studio grid) |
 | [`docs/WALKTHROUGH-SCRIPT.md`](./WALKTHROUGH-SCRIPT.md) | Markdown Beat Sheet | Timed ~60-second chapter-by-chapter narration script & TTS input text |
 | [`scripts/add-voiceover.sh`](../scripts/add-voiceover.sh) | Bash (`gemini-api tts` + `ffmpeg`) | One-command Gemini TTS synthesis (`gemini-3.8-flash-tts`) and AAC muxing into `assets/demo-walkthrough-narrated.mp4` |
 
