@@ -1,4 +1,5 @@
 export * from './tables'
+export * from './rules'
 export * from './sizing'
 export * from './framing-interop'
 export * from './routing'

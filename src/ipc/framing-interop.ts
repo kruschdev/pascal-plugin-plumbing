@@ -8,6 +8,12 @@
  */
 
 import {
+  belongsToLevel as kernelBelongsToLevel,
+  getLowerWalledLevelIds as kernelGetLowerWalledLevelIds,
+  isGroundOrLowestWalledLevel as kernelIsGroundOrLowestWalledLevel,
+  resolveNodeLevelId as kernelResolveNodeLevelId,
+} from '@kruschdev/pascal-mep-kernel'
+import {
   type EquipmentKind,
   type FixtureKind,
   INCHES_TO_METERS,
@@ -304,67 +310,14 @@ export function belongsToLevel(
   node: SceneNodeLike,
   levelId: string | null,
 ): boolean {
-  if (!levelId) return true
-  if (node.id === levelId || node.parentId === levelId) return true
-  let cur: SceneNodeLike | undefined = node
-  let guard = 0
-  while (cur?.parentId && guard < 12) {
-    if (cur.parentId === levelId) return true
-    cur = nodes[cur.parentId]
-    guard += 1
-  }
-  return false
+  return kernelBelongsToLevel(nodes, node, levelId)
 }
 
 export function resolveNodeLevelId(
   nodes: Readonly<Record<string, SceneNodeLike>>,
   node: SceneNodeLike,
 ): string | null {
-  if (node.type === 'level') return node.id
-  let cur: SceneNodeLike | undefined = node
-  let guard = 0
-  while (cur?.parentId && guard < 12) {
-    const parent: SceneNodeLike | undefined = nodes[cur.parentId]
-    if (!parent) return cur.parentId
-    if (parent.type === 'level') return parent.id
-    cur = parent
-    guard += 1
-  }
-  return null
-}
-
-function getLevelOrderFallback(lvl: SceneNodeLike): number {
-  if (typeof lvl.level === 'number' && Number.isFinite(lvl.level)) return lvl.level
-  if (typeof lvl.baseElevation === 'number' && Number.isFinite(lvl.baseElevation)) return lvl.baseElevation
-  if (typeof lvl.elevation === 'number' && Number.isFinite(lvl.elevation)) return lvl.elevation
-  return 0
-}
-
-function compareSiblingLevels(a: SceneNodeLike, b: SceneNodeLike): number {
-  if (
-    typeof a.level === 'number' &&
-    Number.isFinite(a.level) &&
-    typeof b.level === 'number' &&
-    Number.isFinite(b.level)
-  ) {
-    return a.level - b.level
-  }
-  const elevA =
-    typeof a.baseElevation === 'number' && Number.isFinite(a.baseElevation)
-      ? a.baseElevation
-      : typeof a.elevation === 'number' && Number.isFinite(a.elevation)
-        ? a.elevation
-        : null
-  const elevB =
-    typeof b.baseElevation === 'number' && Number.isFinite(b.baseElevation)
-      ? b.baseElevation
-      : typeof b.elevation === 'number' && Number.isFinite(b.elevation)
-        ? b.elevation
-        : null
-  if (elevA !== null && elevB !== null) {
-    return elevA - elevB
-  }
-  return getLevelOrderFallback(a) - getLevelOrderFallback(b)
+  return kernelResolveNodeLevelId(nodes, node)
 }
 
 /**
@@ -376,26 +329,7 @@ export function getLowerWalledLevelIds(
   nodes: Readonly<Record<string, SceneNodeLike>>,
   levelId: string | null | undefined,
 ): string[] {
-  if (!levelId) return []
-  const curLvl = nodes[levelId]
-  if (!curLvl || curLvl.type !== 'level') return []
-  const curBuildingId = typeof curLvl.parentId === 'string' && curLvl.parentId.length > 0 ? curLvl.parentId : null
-
-  const all = Object.values(nodes)
-  const lowerLevels: SceneNodeLike[] = []
-  for (const n of all) {
-    if (n.type !== 'level' || n.id === curLvl.id) continue
-    const oBldg = typeof n.parentId === 'string' && n.parentId.length > 0 ? n.parentId : null
-    if (curBuildingId !== oBldg) continue
-    if (compareSiblingLevels(n, curLvl) < 0) {
-      const hasWalls = all.some((w) => w.type === 'wall' && w.visible !== false && belongsToLevel(nodes, w, n.id))
-      if (hasWalls) {
-        lowerLevels.push(n)
-      }
-    }
-  }
-  lowerLevels.sort(compareSiblingLevels)
-  return lowerLevels.map((l) => l.id)
+  return kernelGetLowerWalledLevelIds(nodes, levelId)
 }
 
 /**
@@ -407,7 +341,7 @@ export function isGroundOrLowestWalledLevel(
   nodes: Readonly<Record<string, SceneNodeLike>>,
   levelId: string | null | undefined,
 ): boolean {
-  return getLowerWalledLevelIds(nodes, levelId).length === 0
+  return kernelIsGroundOrLowestWalledLevel(nodes, levelId)
 }
 
 const bonesContextCache = new WeakMap<

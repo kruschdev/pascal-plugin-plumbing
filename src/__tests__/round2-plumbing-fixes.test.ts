@@ -315,4 +315,59 @@ describe('Round 2 Audit Fixes (R2-PLB-01 & R2-PLB-02)', () => {
     const audit = auditScenePlumbing(fullScene, { codeEdition: 'IPC-2021' })
     expect(audit.errorCount).toBe(0)
   })
+
+  test('Phase 3A-2 kernel delegation: buildPlumbingRoofYAt fixes baseElevation: 0 story ordering and supports all 7 roof types', () => {
+    const bounds = { minX: 0, maxX: 10, minZ: 0, maxZ: 8 }
+
+    // 1. Multi-story baseElevation: 0 trap: level_0 & level_1 both have baseElevation: 0, distinguished only by `level` ordinal
+    const multiStoryZeroBase: Record<string, SceneNodeLike> = {
+      bldg_1: { id: 'bldg_1', type: 'building' },
+      level_0: { id: 'level_0', type: 'level', parentId: 'bldg_1', level: 0, baseElevation: 0, height: 2.7 },
+      level_1: { id: 'level_1', type: 'level', parentId: 'bldg_1', level: 1, baseElevation: 0, height: 2.7 },
+      level_roof: { id: 'level_roof', type: 'level', parentId: 'bldg_1', level: 2, baseElevation: 0 },
+      w0: { id: 'w0', type: 'wall', parentId: 'level_0', start: [0, 0], end: [10, 0], height: 2.7 },
+      w1: { id: 'w1', type: 'wall', parentId: 'level_1', start: [0, 0], end: [10, 0], height: 2.7 },
+      roof_top_hip: {
+        id: 'roof_top_hip',
+        type: 'roof-segment',
+        parentId: 'level_roof',
+        position: [5, 0, 4],
+        width: 10,
+        depth: 8,
+        roofType: 'hip',
+        pitch: 30,
+        overhang: 0.35,
+      },
+    }
+
+    // Lower story must get flat wallH fallback (2.7 m), never adopting level_roof or synthetic gable
+    const lowerRoofYAt = buildPlumbingRoofYAt(multiStoryZeroBase, 'level_0', bounds, 2.7, 6)
+    expect(lowerRoofYAt(5, 4)).toBeCloseTo(2.7, 4)
+
+    // Upper story adopts the hip roof from unwalled level_roof: slopes down toward BOTH X and Z eaves
+    const upperRoofYAt = buildPlumbingRoofYAt(multiStoryZeroBase, 'level_1', bounds, 2.7, 6)
+    expect(upperRoofYAt(5, 4)).toBeGreaterThan(4.5)
+    expect(upperRoofYAt(0.5, 4)).toBeLessThan(upperRoofYAt(5, 4) - 1.5) // Hip end slope along X
+
+    // 2. Mansard, Dutch, and Conical roof types evaluate finite, distinct roof surfaces
+    for (const roofType of ['dutch', 'mansard', 'conical'] as const) {
+      const scene: Record<string, SceneNodeLike> = {
+        level_0: { id: 'level_0', type: 'level', level: 0 },
+        seg: {
+          id: 'seg',
+          type: 'roof-segment',
+          parentId: 'level_0',
+          position: [5, 0, 4],
+          width: 10,
+          depth: 8,
+          roofType,
+          pitch: 30,
+          overhang: 0.35,
+        },
+      }
+      const roofYAt = buildPlumbingRoofYAt(scene, 'level_0', bounds, 2.7, 6)
+      expect(roofYAt(5, 4)).toBeGreaterThan(2.7)
+      expect(roofYAt(5, 4)).toBeGreaterThan(roofYAt(5, 7.8))
+    }
+  })
 })

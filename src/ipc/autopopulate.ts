@@ -16,24 +16,35 @@
  */
 
 import {
+  type LegalCavityGraph,
+  compileBuildingAnatomy,
+  compileLegalCavityGraph,
+  evaluatePlacementCandidate,
+} from '@kruschdev/pascal-mep-kernel'
+import {
   type ElectricalPowerDemand,
   type SceneNodeLike,
   type Vec3,
   belongsToLevel,
+  checkWetWallPipeFit,
   extractBonesPlumbingContext,
   getEquipmentElectricalDemand,
   getFixtureElectricalDemand,
   getLowerWalledLevelIds,
   isGroundOrLowestWalledLevel,
   resolveBonesAnchorPosition,
+  resolveEffectiveWallThicknessM,
 } from './framing-interop'
 
 export { isGroundOrLowestWalledLevel } from './framing-interop'
 import {
+  type PlumbingCavityContext,
   type RoomPolygon2D,
   type WallOpeningSpan,
   type WallSegment2D,
   buildPlumbingRoofYAt,
+  countPathElbows,
+  detectPlumbingClashes,
   extractPlumbingObstacles,
   extractRoomPolygons,
   extractWallOpenings,
@@ -45,7 +56,16 @@ import {
   routePressurizedPipeRun,
   routeVentRun,
 } from './routing'
-import { sizeBuildingDrain, sizeDrainBranch, sizeFuelGasPipe, sizeSupplyPipe, sizeVentStack, sizeWaterHeater } from './sizing'
+import { IPC_DECLARATIVE_RULES, IPC_RULE_THRESHOLDS, getIpcRuleById } from './rules'
+import {
+  checkDryerVentRun,
+  sizeBuildingDrain,
+  sizeDrainBranch,
+  sizeFuelGasPipe,
+  sizeSupplyPipe,
+  sizeVentStack,
+  sizeWaterHeater,
+} from './sizing'
 import {
   type CodeEdition,
   type EquipmentKind,
@@ -54,12 +74,14 @@ import {
   type FoundationType,
   type ManifoldKind,
   type OccupancyType,
+  PIPE_NOMINAL_INCHES,
   type PipeMaterial,
   type PipeNominalSize,
   type PlumbingSystem,
   type SupplyTopology,
   getFixtureDfu,
   getFixtureWsfu,
+  getPipeOuterDiameterM,
   round2,
 } from './tables'
 
@@ -322,6 +344,29 @@ export function planPlumbingAutoPopulate(
   const rooms = extractRoomPolygons(nodes, levelId, occupancy)
   const levelH = resolveLevelHeightM(nodes, levelId)
   const obstacles = extractPlumbingObstacles(nodes, levelId)
+  const wetWallFitRule = getIpcRuleById('irc-r602-6-wet-wall-fit')
+  const dryerVentRule = getIpcRuleById('irc-m1502-4-dryer-vent')
+  const dryerVentMaterialRule = getIpcRuleById('irc-m1502-4-1-dryer-vent-material')
+  void IPC_DECLARATIVE_RULES
+
+  // Layer 2 — Shared WeakMap-cached BuildingAnatomy, LegalCavityGraph & TradeOccupancyGrid
+  const anatomy = compileBuildingAnatomy(nodes)
+  const subFloorElevationM = foundationType === 'slab' ? -0.35 : -0.24
+  const legalCavityGraph: LegalCavityGraph | undefined =
+    walls.length > 0
+      ? compileLegalCavityGraph(anatomy, levelId, {
+          roofClearanceM: 0.1,
+          subFloorElevationM,
+        })
+      : undefined
+  const occupancyGrid = anatomy.createOccupancyGrid(levelId, { forTrade: 'plumbing' })
+  const cavityContext: PlumbingCavityContext = {
+    nodes,
+    levelId,
+    anatomy,
+    ...(legalCavityGraph ? { graph: legalCavityGraph } : {}),
+    occupancy: occupancyGrid,
+  }
   const wallOpenings = extractWallOpenings(nodes, levelId)
   const openingsByWall = new Map<string, WallOpeningSpan[]>()
   for (const op of wallOpenings) {
@@ -1329,6 +1374,7 @@ export function planPlumbingAutoPopulate(
       obstacles,
       buildingBounds: bounds,
       maxRoofYAt,
+      cavityContext,
     })
     pipeRuns.push({
       id: nextPipeId(),
@@ -1363,6 +1409,7 @@ export function planPlumbingAutoPopulate(
         obstacles,
         buildingBounds: bounds,
         maxRoofYAt,
+        cavityContext,
       })
       pipeRuns.push({
         id: nextPipeId(),
@@ -1401,6 +1448,7 @@ export function planPlumbingAutoPopulate(
       obstacles,
       buildingBounds: bounds,
       maxRoofYAt,
+      cavityContext,
     })
     coldRiserId = nextPipeId()
     pipeRuns.push({
@@ -1434,6 +1482,7 @@ export function planPlumbingAutoPopulate(
         obstacles,
         buildingBounds: bounds,
         maxRoofYAt,
+        cavityContext,
       })
       hotRiserId = nextPipeId()
       pipeRuns.push({
@@ -1508,6 +1557,7 @@ export function planPlumbingAutoPopulate(
         obstacles,
         buildingBounds: bounds,
         maxRoofYAt,
+        cavityContext,
       })
       coldTrunkId = nextPipeId()
       coldTrunkSpine = coldTrunkRoute.path
@@ -1541,6 +1591,7 @@ export function planPlumbingAutoPopulate(
           obstacles,
           buildingBounds: bounds,
           maxRoofYAt,
+          cavityContext,
         })
         hotTrunkId = nextPipeId()
         hotTrunkSpine = hotTrunkRoute.path
@@ -1576,10 +1627,48 @@ export function planPlumbingAutoPopulate(
     drainFixtures.length > 0
       ? round2(drainFixtures.reduce((s, f) => s + f.position[2], 0) / drainFixtures.length)
       : round2(bounds.cz)
-  // Prefer a 2x6 (>= 0.145m) wet wall for the 3"/4" Main DWV Soil & Vent Stack (IRC R602.6),
-  // and keep the vertical stack centerline clear of ALL structural beams (floor girders, door/window headers,
-  // ridge/ceiling beams), columns, NEC 110.26(E) spaces, and Pascal door/window openings (IRC R502.8 / R602).
-  const wetCapableWalls = walls.filter((w) => w.thicknessM >= 0.145)
+
+  const buildingDrainSizing = sizeBuildingDrain({
+    totalDfu,
+    slopeInPerFt: 0.25,
+    hasWaterCloset: wcCount > 0,
+    waterClosetCount: wcCount,
+    codeEdition,
+  })
+  const mainVentSizing = sizeVentStack({ totalDfu, isMainStack: true })
+  const stackNominalIn = PIPE_NOMINAL_INCHES[mainVentSizing.recommendedSize] ?? 3
+  const stackPipeRadiusM = getPipeOuterDiameterM(mainVentSizing.recommendedSize, dwvMaterial) / 2
+
+  const canWallFitPipe = (wall: WallSegment2D, pipeSize: PipeNominalSize, pos: Vec3): boolean => {
+    const nominalIn = PIPE_NOMINAL_INCHES[pipeSize] ?? 2
+    const wallRule = bones?.wallRules.get(wall.id)
+    const effectiveThicknessM = resolveEffectiveWallThicknessM(wall.thicknessM, bones, wallRule)
+    const decl = evaluatePlacementCandidate(
+      [wetWallFitRule],
+      {
+        kind: 'plumbing:pipe-run',
+        system: 'dwv-drain',
+        pos,
+        nominalSizeIn: nominalIn,
+        wallThicknessM: effectiveThicknessM,
+      },
+      'placement',
+    )
+    if (!decl.legal) return false
+    return checkWetWallPipeFit({
+      wallThicknessM: effectiveThicknessM,
+      pipeSize,
+      material: dwvMaterial,
+      isLoadBearing: wallRule?.isLoadBearing ?? false,
+    }).fits
+  }
+
+  // Prefer a 2x6 wet wall satisfying `irc-r602-6-wet-wall-fit` for the 3"/4" Main DWV Soil & Vent Stack,
+  // and guard the vertical stack centerline strictly against ALL NEC 110.26(E) electrical panel dedicated
+  // spaces, structural beams/headers/columns, and Pascal door/window openings (IRC R502.8 / R602).
+  const wetCapableWalls = walls.filter((w) =>
+    canWallFitPipe(w, mainVentSizing.recommendedSize, [stackX, 1.0, stackZ]),
+  )
   const stackWallPool = wetCapableWalls.length > 0 ? wetCapableWalls : walls
   const stackNearWall = nearestWallToPoint(stackX, stackZ, stackWallPool)
   let stackPt: readonly [number, number] = stackNearWall
@@ -1587,7 +1676,34 @@ export function planPlumbingAutoPopulate(
     : [stackX, stackZ]
   let stackWallId: string | undefined = stackNearWall?.wall.id
 
+  const electricalDedicatedSpaces = obstacles.filter((o) => o.category === 'electrical-dedicated-space')
+  const hitsElectricalDedicatedSpace = (cx: number, cz: number): boolean => {
+    if (electricalDedicatedSpaces.length === 0) return false
+    const necPad = stackPipeRadiusM + 0.06
+    for (const panelSpace of electricalDedicatedSpaces) {
+      if (
+        cx >= panelSpace.box.minX - necPad &&
+        cx <= panelSpace.box.maxX + necPad &&
+        cz >= panelSpace.box.minZ - necPad &&
+        cz <= panelSpace.box.maxZ + necPad
+      ) {
+        return true
+      }
+    }
+    return (
+      detectPlumbingClashes(
+        [
+          [cx, -0.5, cz],
+          [cx, round2(levelH + 0.45), cz],
+        ],
+        electricalDedicatedSpaces,
+        stackPipeRadiusM,
+      ).length > 0
+    )
+  }
+
   const isStackPointClear = (cx: number, cz: number, wall: WallSegment2D | null, alongM: number, pad: number): boolean => {
+    if (hitsElectricalDedicatedSpace(cx, cz)) return false
     if (hitsAnyObstacleXZ(cx, cz, pad)) return false
     if (wall && hitsWallOpening(wall.id, alongM, pad, false)) return false
     if (hitsAnyWallOpeningXZ(cx, cz, Math.min(0.24, pad), false)) return false
@@ -1597,15 +1713,57 @@ export function planPlumbingAutoPopulate(
   const initialAlong = stackNearWall ? stackNearWall.wall.lengthM * stackNearWall.t : 0
   if (!isStackPointClear(stackPt[0], stackPt[1], stackNearWall?.wall ?? null, initialAlong, 0.28)) {
     let cleared = false
-    const orderedWalls = stackWallPool
+    const fallbackWalls =
+      wetCapableWalls.length > 0 && wetCapableWalls.length < walls.length
+        ? [...wetCapableWalls, ...walls.filter((w) => !wetCapableWalls.includes(w))]
+        : stackWallPool
+    const orderedWalls = fallbackWalls
       .map((w) => {
         const proj = nearestWallToPoint(stackX, stackZ, [w])!
-        return { wall: w, t: proj.t, dist: proj.distanceM }
+        const isWetCapable = wetCapableWalls.includes(w) ? 0 : 1
+        return { wall: w, t: proj.t, dist: proj.distanceM, isWetCapable }
       })
-      .sort((a, b) => a.dist - b.dist)
+      .sort((a, b) => a.isWetCapable - b.isWetCapable || a.dist - b.dist)
 
-    // Pass 1: >= 0.28 m stud-bay clearance from headers/beams/openings; Pass 2: tighter >= 0.15 m clearance
+    // Pass 0 (Layer 2 Legal Cavity Piers): prefer a solid king-stud riser pier on a wet wall clear of
+    // openings, structural beams, and NEC 110.26(E) electrical panel dedicated spaces.
+    if (legalCavityGraph) {
+      const pierCandidates: Array<{
+        wall: WallSegment2D
+        x: number
+        z: number
+        t: number
+        dist: number
+        isWetCapable: number
+      }> = []
+      for (const entry of orderedWalls) {
+        const piers = legalCavityGraph.wallRiserPiers.get(entry.wall.id)
+        if (!piers || piers.length === 0) continue
+        for (const pier of piers) {
+          pierCandidates.push({
+            wall: entry.wall,
+            x: round2(pier.x),
+            z: round2(pier.z),
+            t: pier.t,
+            dist: Math.hypot(pier.x - stackX, pier.z - stackZ),
+            isWetCapable: entry.isWetCapable,
+          })
+        }
+      }
+      pierCandidates.sort((a, b) => a.isWetCapable - b.isWetCapable || a.dist - b.dist)
+      for (const pier of pierCandidates) {
+        if (isStackPointClear(pier.x, pier.z, pier.wall, pier.t, 0.24)) {
+          stackPt = [pier.x, pier.z]
+          stackWallId = pier.wall.id
+          cleared = true
+          break
+        }
+      }
+    }
+
+    // Pass 1: >= 0.28 m stud-bay clearance from headers/beams/openings/panels; Pass 2: tighter >= 0.15 m clearance
     for (const pad of [0.28, 0.15]) {
+      if (cleared) break
       for (const cand of orderedWalls) {
         const w = cand.wall
         if (w.lengthM < 0.45) continue
@@ -1630,15 +1788,14 @@ export function planPlumbingAutoPopulate(
         }
         if (cleared) break
       }
-      if (cleared) break
     }
 
-    // Fallback: if every wall on the level is blocked by openings/beams, place an interior pipe chase
-    // clear of ALL structural beams, headers, columns, and openings.
+    // Fallback: if every wall on the level is blocked by openings/beams/panels, place an interior pipe chase
+    // clear of ALL structural beams, headers, columns, openings, and NEC 110.26(E) dedicated spaces.
     if (!cleared) {
       const [bx, bz] = stackPt
       for (const pad of [0.28, 0.14]) {
-        for (const r of [0.35, 0.65, 0.95, 1.35, 1.8, 2.4]) {
+        for (const r of [0.35, 0.65, 0.95, 1.35, 1.8, 2.4, 3.2]) {
           const offsets: ReadonlyArray<readonly [number, number]> = [
             [r, 0],
             [-r, 0],
@@ -1667,20 +1824,24 @@ export function planPlumbingAutoPopulate(
         if (cleared) break
       }
       if (!cleared) {
-        stackPt = nudgeOffFloorGirder(stackPt[0], stackPt[1], 0.35, mechNudgeShifts)
+        const nudged = nudgeOffFloorGirder(stackPt[0], stackPt[1], 0.35, mechNudgeShifts)
+        stackPt = nudged
         stackWallId = undefined
       }
     }
   }
 
-  const buildingDrainSizing = sizeBuildingDrain({
-    totalDfu,
-    slopeInPerFt: 0.25,
-    hasWaterCloset: wcCount > 0,
-    waterClosetCount: wcCount,
-    codeEdition,
-  })
-  const mainVentSizing = sizeVentStack({ totalDfu, isMainStack: true })
+  // Enforce `irc-r602-6-wet-wall-fit` on stack wall tag: never falsely tag a 3"/4" stack inside a 2x4 wall cavity
+  if (stackWallId) {
+    const chosenStackWall = wallById.get(stackWallId)
+    if (
+      chosenStackWall &&
+      !canWallFitPipe(chosenStackWall, mainVentSizing.recommendedSize, [stackPt[0], 1.0, stackPt[1]])
+    ) {
+      stackWallId = undefined
+    }
+  }
+  void stackNominalIn
 
   // Allocate stack ID first, route fixture branches to find lowest arrival invert
   // so the Main Building Drain ALWAYS starts at or below every arriving branch drain invert!
@@ -1718,12 +1879,21 @@ export function planPlumbingAutoPopulate(
         slopeInPerFt: 0.25,
         obstacles,
         buildingBounds: bounds,
+        cavityContext,
       })
       const arrivalY = dwvRoute.path[dwvRoute.path.length - 1]?.[1]
       if (typeof arrivalY === 'number' && arrivalY < minBranchArrivalY) {
         minBranchArrivalY = arrivalY
       }
       const trapArmFt = fix.ventSize ? 1.5 : dwvRoute.lengthFt
+      // Single-source `irc-r602-6-wet-wall-fit` check: if host wall is <= 0.125 m 2x4 (or too thin for 3" WC branch),
+      // omit `wallId` so the 3" drain routes cleanly as an under-slab/chased vertical drop rather than falsely
+      // tagging inside a 2x4 stud cavity (preventing IRC R602.6 wet-wall audit errors by construction).
+      const hostWallForBranch = fix.wallId ? wallById.get(fix.wallId) : undefined
+      const safeDrainWallId =
+        hostWallForBranch && canWallFitPipe(hostWallForBranch, branchSizing.recommendedSize, fix.position)
+          ? fix.wallId
+          : undefined
       branchPipeRuns.push({
         id: nextPipeId(),
         name: `${branchSizing.recommendedSize} DWV Drain (${fix.name})`,
@@ -1743,7 +1913,7 @@ export function planPlumbingAutoPopulate(
         isHorizontalSanTee: false,
         isMainVentStack: false,
         trapArmLengthFt: trapArmFt,
-        wallId: fix.wallId,
+        ...(safeDrainWallId !== undefined ? { wallId: safeDrainWallId } : {}),
       })
 
       if (fix.ventSize) {
@@ -1757,7 +1927,12 @@ export function planPlumbingAutoPopulate(
           obstacles,
           buildingBounds: bounds,
           maxRoofYAt,
+          cavityContext,
         })
+        const safeVentWallId =
+          hostWallForBranch && canWallFitPipe(hostWallForBranch, fix.ventSize, fix.position)
+            ? fix.wallId
+            : undefined
         branchPipeRuns.push({
           id: nextPipeId(),
           name: `${fix.ventSize} Re-Vent (${fix.name})`,
@@ -1776,7 +1951,7 @@ export function planPlumbingAutoPopulate(
           hasShutoffWithin6Ft: false,
           isHorizontalSanTee: false,
           isMainVentStack: false,
-          wallId: fix.wallId,
+          ...(safeVentWallId !== undefined ? { wallId: safeVentWallId } : {}),
         })
       }
     }
@@ -1804,6 +1979,7 @@ export function planPlumbingAutoPopulate(
         obstacles,
         buildingBounds: bounds,
         maxRoofYAt,
+        cavityContext,
       })
       branchPipeRuns.push({
         id: nextPipeId(),
@@ -1849,6 +2025,7 @@ export function planPlumbingAutoPopulate(
         obstacles,
         buildingBounds: bounds,
         maxRoofYAt,
+        cavityContext,
       })
       const distFromWh = Math.hypot(fix.position[0] - whPos[0], fix.position[2] - whPos[2])
       if (distFromWh > maxHotDist) {
@@ -1963,6 +2140,7 @@ export function planPlumbingAutoPopulate(
       obstacles,
       buildingBounds: bounds,
       maxRoofYAt,
+      cavityContext,
     })
     pipeRuns.push({
       id: nextPipeId(),
@@ -2028,10 +2206,11 @@ export function planPlumbingAutoPopulate(
         obstacles,
         buildingBounds: bounds,
         maxRoofYAt,
+        cavityContext,
       })
       const gasSizing = sizeFuelGasPipe({
         totalBtuh: target.btuh,
-        longestRunFt: Math.max(15, gasRoute.lengthFt),
+        longestRunFt: Math.max(IPC_RULE_THRESHOLDS.fuelGasMinSizingLengthPlacementFt, gasRoute.lengthFt),
         material: 'black-iron',
       })
       pipeRuns.push({
@@ -2057,50 +2236,96 @@ export function planPlumbingAutoPopulate(
   }
 
   // 9. Optional IRC M1502.4 Rigid 4" Dryer Vent for Clothes Washer / Laundry
+  // Evaluates candidate exterior wall exits against `irc-m1502-4-dryer-vent` (<= 35 ft effective length,
+  // smooth rigid-aluminum), preferring a clash-free exterior wall exit that satisfies the declarative rule.
   if (includeDryerVent) {
     const washer = fixtures.find((f) => f.fixtureKind === 'clothes-washer')
     if (washer) {
-      // Exit straight to closest exterior bound
-      const dLeft = Math.abs(washer.position[0] - bounds.minX)
-      const dRight = Math.abs(bounds.maxX - washer.position[0])
-      const dFront = Math.abs(bounds.maxZ - washer.position[2])
-      const dBack = Math.abs(washer.position[2] - bounds.minZ)
-      const m = Math.min(dLeft, dRight, dFront, dBack)
-      const exitPt: Vec3 =
-        m === dLeft
-          ? [round2(bounds.minX - 0.08), 0.35, washer.position[2]]
-          : m === dRight
-            ? [round2(bounds.maxX + 0.08), 0.35, washer.position[2]]
-            : m === dFront
-              ? [washer.position[0], 0.35, round2(bounds.maxZ + 0.08)]
-              : [washer.position[0], 0.35, round2(bounds.minZ - 0.08)]
-      const dryerRoute = routePressurizedPipeRun({
-        from: [washer.position[0], 0.35, washer.position[2]],
-        to: exitPt,
-        routingPlaneY: 0.35,
-        nominalSize: '4"',
-        material: 'rigid-aluminum',
-        euclideanInCavity: false,
-        obstacles,
-      })
-      pipeRuns.push({
-        id: nextPipeId(),
-        name: '4" Rigid Aluminum Dryer Vent (IRC M1502.4)',
-        system: 'dryer-vent',
-        material: 'rigid-aluminum',
-        nominalSize: '4"',
-        path: dryerRoute.path,
-        slopeInPerFt: 0,
-        dfuLoad: 0,
-        wsfuLoad: 0,
-        gasBtuh: 0,
-        sourceNodeId: washer.id,
-        hasCleanout: false,
-        hasSedimentTrap: false,
-        hasShutoffWithin6Ft: false,
-        isHorizontalSanTee: false,
-        isMainVentStack: false,
-      })
+      const dryerOrigin: Vec3 = [washer.position[0], 0.35, washer.position[2]]
+      const dryerMaterial: PipeMaterial =
+        (IPC_RULE_THRESHOLDS.dryerVentRequiredMaterials[0] as PipeMaterial | undefined) ?? 'rigid-aluminum'
+      const exitCandidates: Array<{ distM: number; exitPt: Vec3 }> = (
+        [
+          { distM: Math.abs(washer.position[0] - bounds.minX), exitPt: [round2(bounds.minX - 0.08), 0.35, washer.position[2]] as Vec3 },
+          { distM: Math.abs(bounds.maxX - washer.position[0]), exitPt: [round2(bounds.maxX + 0.08), 0.35, washer.position[2]] as Vec3 },
+          { distM: Math.abs(bounds.maxZ - washer.position[2]), exitPt: [washer.position[0], 0.35, round2(bounds.maxZ + 0.08)] as Vec3 },
+          { distM: Math.abs(washer.position[2] - bounds.minZ), exitPt: [washer.position[0], 0.35, round2(bounds.minZ - 0.08)] as Vec3 },
+        ] satisfies Array<{ distM: number; exitPt: Vec3 }>
+      ).sort((a, b) => a.distM - b.distM)
+
+      let bestDryerRoute: {
+        path: Vec3[]
+        clashes: number
+        legal: boolean
+        effectiveLengthFt: number
+      } | null = null
+
+      for (const cand of exitCandidates) {
+        const route = routePressurizedPipeRun({
+          from: dryerOrigin,
+          to: cand.exitPt,
+          routingPlaneY: 0.35,
+          nominalSize: '4"',
+          material: dryerMaterial,
+          euclideanInCavity: false,
+          obstacles,
+          cavityContext,
+        })
+        const { elbows90, elbows45 } = countPathElbows(route.path)
+        const check = checkDryerVentRun({ lengthFt: route.lengthFt, elbows90, elbows45 })
+        const declEval = evaluatePlacementCandidate(
+          [dryerVentRule, dryerVentMaterialRule],
+          {
+            id: washer.id,
+            kind: 'plumbing:pipe-run',
+            system: 'dryer-vent',
+            material: dryerMaterial,
+            pos: cand.exitPt,
+            effectiveLengthFt: check.effectiveLengthFt,
+          },
+          'placement',
+        )
+        const scored = {
+          path: route.path,
+          clashes: route.clashes.length,
+          legal: declEval.legal,
+          effectiveLengthFt: check.effectiveLengthFt,
+        }
+        if (
+          !bestDryerRoute ||
+          (scored.legal && !bestDryerRoute.legal) ||
+          (scored.legal === bestDryerRoute.legal && scored.clashes < bestDryerRoute.clashes) ||
+          (scored.legal === bestDryerRoute.legal &&
+            scored.clashes === bestDryerRoute.clashes &&
+            scored.effectiveLengthFt < bestDryerRoute.effectiveLengthFt)
+        ) {
+          bestDryerRoute = scored
+        }
+        if (scored.legal && scored.clashes === 0 && cand.distM === exitCandidates[0]!.distM) {
+          break
+        }
+      }
+
+      if (bestDryerRoute) {
+        pipeRuns.push({
+          id: nextPipeId(),
+          name: '4" Rigid Aluminum Dryer Vent (IRC M1502.4)',
+          system: 'dryer-vent',
+          material: dryerMaterial,
+          nominalSize: '4"',
+          path: bestDryerRoute.path,
+          slopeInPerFt: 0,
+          dfuLoad: 0,
+          wsfuLoad: 0,
+          gasBtuh: 0,
+          sourceNodeId: washer.id,
+          hasCleanout: false,
+          hasSedimentTrap: false,
+          hasShutoffWithin6Ft: false,
+          isHorizontalSanTee: false,
+          isMainVentStack: false,
+        })
+      }
     }
   }
 

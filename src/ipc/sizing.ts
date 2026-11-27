@@ -8,6 +8,7 @@
  * - IRC M1502.4 rigid dryer vent effective-length check
  */
 
+import { IPC_RULE_THRESHOLDS } from './rules'
 import {
   type CodeEdition,
   HUNTERS_CURVE_WSFU_TO_GPM,
@@ -41,8 +42,8 @@ export type DrainSizingResult = {
  * - >= 3": 1/8" per foot minimum (0.125 in/ft = 1.04%), 1/4" per foot preferred.
  */
 export function getMinRequiredDrainSlopeInPerFt(size: PipeNominalSize): 0.125 | 0.25 {
-  if (size === '3"' || size === '4"' || size === '6"') return 0.125
-  return 0.25
+  if (size === '3"' || size === '4"' || size === '6"') return IPC_RULE_THRESHOLDS.drainSlopeLargeInPerFt
+  return IPC_RULE_THRESHOLDS.drainSlopeSmallInPerFt
 }
 
 /**
@@ -423,7 +424,7 @@ export function sizeFuelGasPipe(params: {
 }): FuelGasSizingResult {
   const { totalBtuh, longestRunFt, material = 'black-iron' } = params
   const kbtuh = Math.max(0, totalBtuh / 1000)
-  const exceedsMaxTableLength = longestRunFt > 200
+  const exceedsMaxTableLength = longestRunFt > IPC_RULE_THRESHOLDS.fuelGasMaxEffectiveLengthFt
 
   if (material === 'csst') {
     const row =
@@ -505,7 +506,7 @@ export function checkDryerVentRun(params: {
 } {
   const { lengthFt, elbows90 = 2, elbows45 = 0 } = params
   const effectiveLengthFt = round2(lengthFt + elbows90 * 5 + elbows45 * 2.5)
-  const maxAllowedFt = 35
+  const maxAllowedFt = IPC_RULE_THRESHOLDS.dryerVentMaxEffectiveLengthFt
   return {
     ok: effectiveLengthFt <= maxAllowedFt,
     lengthFt: round2(lengthFt),

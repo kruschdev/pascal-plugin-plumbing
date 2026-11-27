@@ -5,6 +5,7 @@
  * Framework-free: zero React, Three.js, or `@pascal-app/*` imports.
  */
 
+import { evaluatePlacementCandidate } from '@kruschdev/pascal-mep-kernel'
 import {
   type BonesPlumbingContext,
   type SceneNodeLike,
@@ -25,12 +26,12 @@ import {
   polylineHorizontalLengthM,
   polylineLengthM,
 } from './routing'
+import { IPC_DECLARATIVE_RULES, IPC_RULE_THRESHOLDS, getIpcRuleById } from './rules'
 import { buildElectricalCoordination } from './schedule'
 import {
   calculateSupplyHydraulics,
   checkDryerVentRun,
   checkTrapArmDistance,
-  getMinRequiredDrainSlopeInPerFt,
   sizeBuildingDrain,
   sizeDrainBranch,
   sizeFuelGasPipe,
@@ -42,6 +43,7 @@ import {
   type FixtureKind,
   METERS_TO_FEET,
   type OccupancyType,
+  PIPE_NOMINAL_INCHES,
   type PipeMaterial,
   type PipeNominalSize,
   type PlumbingSystem,
@@ -244,13 +246,26 @@ export function auditScenePlumbing(
     return st
   }
 
+  const drainSlopeSmallRule = getIpcRuleById('ipc-704-1-drain-slope-small')
+  const drainSlopeLargeRule = getIpcRuleById('ipc-704-1-drain-slope-large')
+  const dryVentHeightRule = getIpcRuleById('ipc-905-5-dry-vent-height')
+  const mainVentStackRule = getIpcRuleById('ipc-903-1-main-vent-stack')
+  const cleanoutIntervalRule = getIpcRuleById('ipc-708-1-cleanout-interval')
+  const wetWallFitRule = getIpcRuleById('irc-r602-6-wet-wall-fit')
+  const dryerVentRule = getIpcRuleById('irc-m1502-4-dryer-vent')
+  const dryerVentMaterialRule = getIpcRuleById('irc-m1502-4-1-dryer-vent-material')
+  const fuelGasMaxLenRule = getIpcRuleById('ifgc-402-4-fuel-gas-max-len')
+  void IPC_DECLARATIVE_RULES
+
   for (const run of pipeRuns) {
     const system = (run.system as PlumbingSystem) || 'cold-water'
     const material = (run.material as PipeMaterial) || 'pex-a'
     const size = (run.nominalSize as PipeNominalSize) || '1/2"'
+    const nominalIn = PIPE_NOMINAL_INCHES[size] ?? 0.5
     const path = Array.isArray(run.path)
       ? (run.path as ReadonlyArray<readonly [number, number, number]>)
       : []
+    const runAnchorPos: readonly [number, number, number] = path[0] ?? [0, 0, 0]
     const lengthFt = polylineLengthM(path) * METERS_TO_FEET
     const pipeRadiusM = getPipeOuterDiameterM(size, material) / 2
     const runLevelId = resolveNodeLevelId(nodes, run)
@@ -260,13 +275,24 @@ export function auditScenePlumbing(
     if (run.hasCleanout === true) lvlState.hasAnyCleanout = true
     if (run.isMainVentStack === true) {
       lvlState.hasMainVentStack = true
-      if (comparePipeSizes(size, '3"') < 0) {
+      const stackEval = evaluatePlacementCandidate(
+        [mainVentStackRule],
+        {
+          id: run.id,
+          kind: 'plumbing:pipe-run',
+          system: 'dwv-main-vent-stack',
+          pos: runAnchorPos,
+          nominalSizeIn: nominalIn,
+        },
+        'audit',
+      )
+      if (!stackEval.legal) {
         push({
-          severity: 'error',
-          codeRef: 'IPC 903.1',
-          title: `Main vent stack (${size}) below 3" minimum diameter`,
-          detail: `${run.name ?? run.id} is marked as a main vent stack but is sized ${size} instead of at least 3".`,
-          suggestedFix: 'Upsize the main vent stack through roof to at least 3" per IPC 903.1.',
+          severity: mainVentStackRule.severity,
+          codeRef: mainVentStackRule.codeRef,
+          title: `Main vent stack (${size}) below ${IPC_RULE_THRESHOLDS.mainVentStackMinNominalIn}" minimum diameter`,
+          detail: `${run.name ?? run.id} is marked as a main vent stack but is sized ${size} instead of at least ${IPC_RULE_THRESHOLDS.mainVentStackMinNominalIn}".`,
+          suggestedFix: mainVentStackRule.suggestedFix,
           nodeIds: [run.id],
         })
       }
@@ -309,19 +335,32 @@ export function auditScenePlumbing(
       const bonesCtx = getBonesForLevel(runLevelId)
       const wallRule = bonesCtx.wallRules.get(wall.id)
       const effectiveWallThicknessM = resolveEffectiveWallThicknessM(wall.thicknessM, bonesCtx, wallRule)
+      const declarativeWallFit = evaluatePlacementCandidate(
+        [wetWallFitRule],
+        {
+          id: run.id,
+          kind: 'plumbing:pipe-run',
+          system,
+          pos: runAnchorPos,
+          nominalSizeIn: nominalIn,
+          wallThicknessM: effectiveWallThicknessM,
+        },
+        'audit',
+      )
       const fit = checkWetWallPipeFit({
         wallThicknessM: effectiveWallThicknessM,
         pipeSize: size,
         material,
         isLoadBearing: wallRule?.isLoadBearing ?? false,
       })
-      if (!fit.fits) {
+      if (!declarativeWallFit.legal || !fit.fits) {
+        const reason = fit.reason ?? declarativeWallFit.violations[0]?.message ?? wetWallFitRule.title
         push({
-          severity: 'error',
-          codeRef: fit.codeRef,
+          severity: wetWallFitRule.severity,
+          codeRef: !fit.fits ? fit.codeRef : wetWallFitRule.codeRef,
           title: `Wet wall too thin for ${size} ${material.toUpperCase()} pipe`,
-          detail: `${run.name ?? run.id} inside wall ${wall.id}: ${fit.reason}`,
-          suggestedFix: 'Upgrade this wet wall to 2x6 framing (>= 0.15 m thick) or add a dedicated pipe chase.',
+          detail: `${run.name ?? run.id} inside wall ${wall.id}: ${reason}`,
+          suggestedFix: wetWallFitRule.suggestedFix,
           nodeIds: [run.id, wall.id],
         })
       }
@@ -388,26 +427,41 @@ export function auditScenePlumbing(
         }
       }
 
-      const minSlope = getMinRequiredDrainSlopeInPerFt(size)
+      const isLargeDrain = nominalIn >= IPC_RULE_THRESHOLDS.wetWallMinPipeNominalIn
+      const slopeRule = isLargeDrain ? drainSlopeLargeRule : drainSlopeSmallRule
+      const minSlope = slopeRule.params.minSlopeInPerFt!
       if (slopeInfo) {
         if (slopeInfo.hasUphillSegment) {
           push({
-            severity: 'error',
-            codeRef: 'IPC 704.1',
+            severity: slopeRule.severity,
+            codeRef: slopeRule.codeRef,
             title: 'DWV drain routes uphill (gravity flow violated)',
             detail: `${run.name ?? run.id} contains an upward-sloping drainage segment.`,
             suggestedFix: `Re-slope drain continuously downward at >= ${minSlope}"/ft toward the building drain.`,
             nodeIds: [run.id],
           })
-        } else if (slopeInfo.horizontalSegments > 0 && slopeInfo.minSegmentSlopeInPerFt < minSlope - 0.02) {
-          push({
-            severity: 'error',
-            codeRef: 'IPC Table 704.1',
-            title: `DWV drain slope below ${minSlope}"/ft minimum`,
-            detail: `${run.name ?? run.id} (${size}) measures ${slopeInfo.minSegmentSlopeInPerFt}"/ft (requires >= ${minSlope}"/ft).`,
-            suggestedFix: `Increase downward pitch to at least ${minSlope}"/ft (${minSlope === 0.25 ? '2.08%' : '1.04%'}).`,
-            nodeIds: [run.id],
-          })
+        } else if (slopeInfo.horizontalSegments > 0) {
+          const slopeEval = evaluatePlacementCandidate(
+            [slopeRule],
+            {
+              id: run.id,
+              kind: 'plumbing:pipe-run',
+              system: isLargeDrain ? 'dwv-drain-large' : 'dwv-drain-small',
+              pos: runAnchorPos,
+              slopeInPerFt: slopeInfo.minSegmentSlopeInPerFt + 0.02,
+            },
+            'audit',
+          )
+          if (!slopeEval.legal) {
+            push({
+              severity: slopeRule.severity,
+              codeRef: 'IPC Table 704.1',
+              title: `DWV drain slope below ${minSlope}"/ft minimum`,
+              detail: `${run.name ?? run.id} (${size}) measures ${slopeInfo.minSegmentSlopeInPerFt}"/ft (requires >= ${minSlope}"/ft).`,
+              suggestedFix: `Increase downward pitch to at least ${minSlope}"/ft (${minSlope === 0.25 ? '2.08%' : '1.04%'}).`,
+              nodeIds: [run.id],
+            })
+          }
         }
       }
 
@@ -448,39 +502,64 @@ export function auditScenePlumbing(
         }
       }
 
-      if (lengthFt > 100 && !run.hasCleanout) {
+      const cleanoutEval = evaluatePlacementCandidate(
+        [cleanoutIntervalRule],
+        {
+          id: run.id,
+          kind: 'plumbing:pipe-run',
+          system: 'dwv-drain',
+          pos: runAnchorPos,
+          runLengthFt: lengthFt,
+          hasCleanout: Boolean(run.hasCleanout),
+        },
+        'audit',
+      )
+      if (!cleanoutEval.legal) {
         push({
-          severity: 'warning',
-          codeRef: 'IPC 708.1',
-          title: 'Building drain > 100 ft without intermediate cleanout',
+          severity: cleanoutIntervalRule.severity,
+          codeRef: cleanoutIntervalRule.codeRef,
+          title: `Building drain > ${IPC_RULE_THRESHOLDS.cleanoutMaxIntervalFt} ft without intermediate cleanout`,
           detail: `${run.name ?? run.id} spans ${round2(lengthFt)} ft without a cleanout.`,
-          suggestedFix: 'Add an accessible two-way cleanout at <= 100 ft intervals.',
+          suggestedFix: cleanoutIntervalRule.suggestedFix,
           nodeIds: [run.id],
         })
       }
     }
 
-    // Vent flood-level rim check (IPC 905.5)
+    // Vent flood-level rim check (IPC 905.5 — single-source declarative rule)
     if (system === 'dwv-vent' && !run.isMainVentStack && typeof run.sourceNodeId === 'string') {
       const src = nodes[run.sourceNodeId]
       if (src && src.type === 'plumbing:fixture' && path.length >= 2) {
         const kind = (src.fixtureKind as FixtureKind) || 'lavatory'
         const floodRimM = FIXTURE_SPECS[kind]?.floodRimHeightM ?? 0.85
-        const minHorizontalVentY = floodRimM + 0.1524 // 6" above flood rim
+        const minHorizontalVentY = floodRimM + IPC_RULE_THRESHOLDS.ventMinAboveFloodRimM
         for (let i = 1; i < path.length; i++) {
           const a = path[i - 1]!
           const b = path[i]!
           const horiz = Math.hypot(b[0] - a[0], b[2] - a[2])
-          if (horiz > 0.25 && Math.min(a[1], b[1]) < minHorizontalVentY - 0.02) {
-            push({
-              severity: 'error',
-              codeRef: 'IPC 905.5',
-              title: 'Horizontal dry vent below 6" above fixture flood-level rim',
-              detail: `${run.name ?? run.id} runs horizontally at ${(Math.min(a[1], b[1]) * 39.37).toFixed(0)}" AFF (minimum ${(minHorizontalVentY * 39.37).toFixed(0)}" AFF).`,
-              suggestedFix: 'Rise vertically inside wet wall to at least 6" above fixture flood-level rim before turning horizontal.',
-              nodeIds: [run.id, src.id],
-            })
-            break
+          if (horiz > 0.25) {
+            const segMinY = Math.min(a[1], b[1])
+            const ventEval = evaluatePlacementCandidate(
+              [dryVentHeightRule],
+              {
+                id: run.id,
+                kind: 'dwv-vent',
+                pos: [a[0], segMinY + 0.02, a[2]],
+                floodRimM,
+              },
+              'audit',
+            )
+            if (!ventEval.legal) {
+              push({
+                severity: dryVentHeightRule.severity,
+                codeRef: dryVentHeightRule.codeRef,
+                title: dryVentHeightRule.title,
+                detail: `${run.name ?? run.id} runs horizontally at ${(segMinY * 39.37).toFixed(0)}" AFF (minimum ${(minHorizontalVentY * 39.37).toFixed(0)}" AFF).`,
+                suggestedFix: dryVentHeightRule.suggestedFix,
+                nodeIds: [run.id, src.id],
+              })
+              break
+            }
           }
         }
       }
@@ -518,27 +597,38 @@ export function auditScenePlumbing(
       }
     }
 
-    // Fuel Gas (IFGC 402.4 / 408.4 / 409.5)
+    // Fuel Gas (IFGC 402.4 / 408.4 / 409.5 — single-source declarative max length & unified sizing floor)
     if (system === 'fuel-gas') {
       const btuh = typeof run.gasBtuh === 'number' ? run.gasBtuh : 0
       if (btuh > 0) {
         const gasMat = material === 'csst' ? 'csst' : 'black-iron'
-        const runLenFt = Math.max(10, lengthFt)
+        const runLenFt = Math.max(IPC_RULE_THRESHOLDS.fuelGasMinSizingLengthAuditFt, lengthFt)
+        const gasLenEval = evaluatePlacementCandidate(
+          [fuelGasMaxLenRule],
+          {
+            id: run.id,
+            kind: 'plumbing:pipe-run',
+            system: 'fuel-gas',
+            pos: runAnchorPos,
+            effectiveLengthFt: runLenFt,
+          },
+          'audit',
+        )
         const sizing = sizeFuelGasPipe({
           totalBtuh: btuh,
           longestRunFt: runLenFt,
           material: gasMat,
         })
-        if (!sizing.ok) {
+        if (!sizing.ok || !gasLenEval.legal) {
+          const exceedsLen = !gasLenEval.legal || runLenFt > IPC_RULE_THRESHOLDS.fuelGasMaxEffectiveLengthFt
           push({
-            severity: 'error',
+            severity: fuelGasMaxLenRule.severity,
             codeRef: sizing.codeRef,
-            title:
-              runLenFt > 200
-                ? `Fuel gas run (${round2(lengthFt)} ft) exceeds 200 ft IFGC table limit`
-                : `Fuel gas load (${Math.round(btuh / 1000)} kBTU/hr) exceeds max ${gasMat} table capacity`,
-            detail: `${run.name ?? run.id} (${round2(lengthFt)} ft ${gasMat}) exceeds ${sizing.codeRef} limits (max ${Math.round(sizing.capacityBtuh / 1000)} kBTU/hr ${runLenFt > 200 ? 'at <= 200 ft' : `at ${round2(runLenFt)} ft`}).`,
-            suggestedFix: 'Shorten gas piping run, switch to higher-capacity material/size, or design a 2 psi system with line regulators per IFGC 402.4.',
+            title: exceedsLen
+              ? `Fuel gas run (${round2(lengthFt)} ft) exceeds ${IPC_RULE_THRESHOLDS.fuelGasMaxEffectiveLengthFt} ft IFGC table limit`
+              : `Fuel gas load (${Math.round(btuh / 1000)} kBTU/hr) exceeds max ${gasMat} table capacity`,
+            detail: `${run.name ?? run.id} (${round2(lengthFt)} ft ${gasMat}) exceeds ${sizing.codeRef} limits (max ${Math.round(sizing.capacityBtuh / 1000)} kBTU/hr ${exceedsLen ? `at <= ${IPC_RULE_THRESHOLDS.fuelGasMaxEffectiveLengthFt} ft` : `at ${round2(runLenFt)} ft`}).`,
+            suggestedFix: fuelGasMaxLenRule.suggestedFix,
             nodeIds: [run.id],
           })
         } else if (comparePipeSizes(size, sizing.recommendedSize) < 0) {
@@ -574,27 +664,41 @@ export function auditScenePlumbing(
       }
     }
 
-    // Dryer Vent (IRC M1502.4)
+    // Dryer Vent (IRC M1502.4 / M1502.4.1 — single-source declarative rules)
     if (system === 'dryer-vent') {
       const { elbows90, elbows45 } = countPathElbows(path)
       const check = checkDryerVentRun({ lengthFt, elbows90, elbows45 })
-      if (!check.ok) {
+      const dryerEval = evaluatePlacementCandidate(
+        [dryerVentRule, dryerVentMaterialRule],
+        {
+          id: run.id,
+          kind: 'plumbing:pipe-run',
+          system: 'dryer-vent',
+          pos: runAnchorPos,
+          effectiveLengthFt: check.effectiveLengthFt,
+          material,
+        },
+        'audit',
+      )
+      const lenViol = dryerEval.violations.find((v) => v.ruleId === dryerVentRule.id)
+      const matViol = dryerEval.violations.find((v) => v.ruleId === dryerVentMaterialRule.id)
+      if (lenViol) {
         push({
-          severity: 'error',
-          codeRef: check.codeRef,
-          title: `Dryer vent effective length (${check.effectiveLengthFt} ft) exceeds 35 ft max`,
+          severity: dryerVentRule.severity,
+          codeRef: dryerVentRule.codeRef,
+          title: `Dryer vent effective length (${check.effectiveLengthFt} ft) exceeds ${IPC_RULE_THRESHOLDS.dryerVentMaxEffectiveLengthFt} ft max`,
           detail: `${run.name ?? run.id} measures ${check.lengthFt} ft + ${elbows90}×90° + ${elbows45}×45° elbows.`,
-          suggestedFix: 'Shorten exhaust run, eliminate unnecessary 90° elbows, or add a listed dryer exhaust booster fan.',
+          suggestedFix: dryerVentRule.suggestedFix,
           nodeIds: [run.id],
         })
       }
-      if (material !== 'rigid-aluminum') {
+      if (matViol) {
         push({
-          severity: 'error',
-          codeRef: 'IRC M1502.4.1',
-          title: 'Dryer exhaust duct must be smooth rigid metal',
+          severity: dryerVentMaterialRule.severity,
+          codeRef: dryerVentMaterialRule.codeRef,
+          title: dryerVentMaterialRule.title,
           detail: `${run.name ?? run.id} uses ${material} instead of 4" smooth rigid aluminum/galvanized metal.`,
-          suggestedFix: 'Switch dryer vent material to 4" rigid-aluminum (never vinyl or foil flex).',
+          suggestedFix: dryerVentMaterialRule.suggestedFix,
           nodeIds: [run.id],
         })
       }
