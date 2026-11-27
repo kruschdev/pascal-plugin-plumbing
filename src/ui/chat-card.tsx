@@ -1,3 +1,5 @@
+'use client'
+
 /**
  * Persisted ChatToolCard for `krusch:plumbing` (`PluginChatExtension`).
  */

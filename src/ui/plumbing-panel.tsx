@@ -1,3 +1,5 @@
+'use client'
+
 /**
  * Left-rail EditorHostPanel for `krusch:plumbing`.
  * Uses scoped inline styles and Pascal CSS variables so zero global CSS leaks.

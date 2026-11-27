@@ -1,3 +1,5 @@
+'use client'
+
 /**
  * Full-pane EditorHostView (`krusch:plumbing:schedule`) that opens beside the 3D/2D scene:
  * 6 Tabs: Fixtures | Loads & Electrical | IPC/IFGC Audit | Framing Drill List | Priced BOM | 3D Manifold Cutaway.

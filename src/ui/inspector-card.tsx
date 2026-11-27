@@ -1,3 +1,5 @@
+'use client'
+
 /**
  * InspectorExtension card for `plumbing:*` nodes:
  * Shows live NOT TO CODE / COMPLIANT status, DFU/WSFU/slope/velocity/framing-penetration metrics,

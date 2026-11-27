@@ -20,8 +20,7 @@ import {
   plumbingPipeRunParametrics,
 } from './nodes/parametrics'
 import { plumbingPipeRunRenderDefinition } from './nodes/pipe-run'
-import { PLUMBING_PLUGIN_ID, plumbingRenderPlugin } from './render'
-import { PLUMBING_SCHEDULE_VIEW_ID } from './ui/plumbing-panel'
+import { PLUMBING_PLUGIN_ID, PLUMBING_SCHEDULE_VIEW_ID, plumbingRenderPlugin } from './render'
 
 export const plumbingInspectorExtensions: InspectorExtension[] = [
   {
@@ -137,6 +136,7 @@ export const plumbingChatExtension: PluginChatExtension = {
 
 export {
   PLUMBING_PLUGIN_ID,
+  PLUMBING_SCHEDULE_VIEW_ID,
   plumbingRenderPlugin,
   PlumbingEquipmentNode,
   EquipmentKindEnum,
@@ -150,5 +150,4 @@ export {
   PlumbingSystemEnum,
   PipeMaterialEnum,
 } from './render'
-export { PLUMBING_SCHEDULE_VIEW_ID } from './ui/plumbing-panel'
 export * from './ipc'

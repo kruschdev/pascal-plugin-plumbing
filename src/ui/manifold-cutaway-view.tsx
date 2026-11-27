@@ -1,3 +1,5 @@
+'use client'
+
 /**
  * Interactive 3D PEX Manifold & 2x6 Wet-Wall Framing Cutaway Viewer (`src/ui/manifold-cutaway-view.tsx`).
  * Plumbing's signature interactive 3D cutaway view inside the split-pane Plumbing Schedule.

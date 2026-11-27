@@ -11,6 +11,7 @@ import { plumbingManifoldRenderDefinition } from './nodes/manifold'
 import { plumbingPipeRunRenderDefinition } from './nodes/pipe-run'
 
 export const PLUMBING_PLUGIN_ID = 'krusch:plumbing' as const
+export const PLUMBING_SCHEDULE_VIEW_ID = 'krusch:plumbing:schedule' as const
 
 export const plumbingRenderPlugin: Plugin = {
   id: PLUMBING_PLUGIN_ID,
